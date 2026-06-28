@@ -229,6 +229,8 @@ switch_node() {
         local current
         current=$(get_current_node)
         if [ "$current" = "$target" ]; then
+            log "    節點切換成功: ${target} — 同步 GUI（重啟 Stash）"
+            restart_stash
             return 0
         fi
 
@@ -715,18 +717,12 @@ cmd_monitor() {
         ping_only)
             log "狀態: Ping 正常，HTTP 代理失敗 — VPN 可能斷線"
             log "啟動恢復流程..."
-            if recover; then
-                sleep 3  # 等待記憶體狀態穩定再重啟
-                restart_stash
-            fi
+            recover
             ;;
         fail)
             log "狀態: 全部檢測失敗 — VPN 已斷線"
             log "啟動恢復流程..."
-            if recover; then
-                sleep 3  # 等待記憶體狀態穩定再重啟
-                restart_stash
-            fi
+            recover
             ;;
     esac
 
@@ -963,11 +959,6 @@ cmd_live_test() {
             echo "  [恢復] ⚠ 當前節點為「${restored_node:-empty}」，未正確恢復"
             overall_pass=false
         fi
-
-        # GUI 同步：重啟 Stash 使 GUI 顯示正確節點
-        echo ""
-        echo "  [GUI 同步] 重啟 Stash 以更新 GUI 顯示..."
-        restart_stash
     fi
 
     # ════════════════════════════════════════════
