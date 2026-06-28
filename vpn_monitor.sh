@@ -469,10 +469,42 @@ refresh_subscription() {
     fi
 }
 
-# Step 4: 切換到備份 config（遍歷所有可用 config，逐一嘗試）
-# 支援 N 個 config，不硬編碼名稱
+# Step 4: 切換 config（共用函數）
+#   切換 config + 等待載入 + 重啟 Stash + 驗證 API
+# 用法: switch_config "target_config"
+# 返回: 0=成功, 1=失敗
+switch_config() {
+    local target="$1"
+    log "切換 config: ${target}..."
+
+    local switch_output switch_rc
+    switch_output=$("$PYTHON_BIN" "$CONFIG_SWITCHER" "$target" 2>&1)
+    switch_rc=$?
+    echo "$switch_output" | while IFS= read -r line; do [ -n "$line" ] && log "  ${line}"; done
+
+    if [ $switch_rc -ne 0 ]; then
+        log "  ✗ Config 切換指令失敗 (rc=${switch_rc})"
+        return 1
+    fi
+
+    log "  等待 Stash 載入新 config（15 秒）..."
+    sleep 15
+
+    # Config 切換（不同 yaml）後需要重啟 Stash 才能載入新 proxy groups
+    restart_stash
+
+    if ! check_api; then
+        log "  ✗ 重啟後 API 無回應"
+        return 1
+    fi
+
+    log "  ✓ Config 切換成功: ${target}"
+    return 0
+}
+
+# Step 5: 遍歷所有備選 config（使用 switch_config）
 try_alternative_configs() {
-    log ">>> Step 4: 遍歷所有備選 config..."
+    log ">>> Step 5: 遍歷所有備選 config..."
 
     if [ ! -f "$CONFIG_SWITCHER" ] || ! has_python; then
         log "    WARNING: config switcher 或 Python 不可用，跳過"
@@ -498,20 +530,9 @@ try_alternative_configs() {
         [ "$alt_config" = "$current_config" ] && continue
 
         log "    嘗試切換到 config: ${alt_config}..."
-        local switch_output switch_rc
-        switch_output=$("$PYTHON_BIN" "$CONFIG_SWITCHER" "$alt_config" 2>&1)
-        switch_rc=$?
-        echo "$switch_output" | while IFS= read -r line; do [ -n "$line" ] && log "    ${line}"; done
 
-        if [ $switch_rc -ne 0 ]; then
-            log "    切換到 ${alt_config} 失敗，嘗試下一個"
-            continue
-        fi
-
-        sleep 10  # 等 Stash 載入新 config
-
-        if ! check_api; then
-            log "    ${alt_config} 載入後 API 無回應，嘗試下一個"
+        if ! switch_config "$alt_config"; then
+            log "    ${alt_config} 切換失敗，嘗試下一個"
             continue
         fi
 
@@ -1083,130 +1104,66 @@ cmd_live_test() {
             else
                 echo "  目標 config: ${target_config}"
 
-                # 執行切換
+                # 執行切換（使用共用函數）
                 echo "  正在切換到 ${target_config}..."
-                local switch_output switch_rc
-                switch_output=$("$PYTHON_BIN" "$CONFIG_SWITCHER" "$target_config" 2>&1)
-                switch_rc=$?
-
-                if [ $switch_rc -eq 0 ]; then
-                    echo "  Config 切換指令: ✓ 已發送"
-                    echo "$switch_output" | while IFS= read -r line; do [ -n "$line" ] && echo "    ${line}"; done
-
-                    echo "  等待 Stash 載入新 config（15 秒）..."
-                    sleep 15
-
-                    if check_api; then
-                        echo "  API: ✓ 仍可用"
-
-                        # 驗證 config 是否切換
-                        local new_config
-                        new_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-                        if [ "$new_config" = "$target_config" ]; then
-                            echo "  Config 切換確認: ✓（當前: ${new_config}）"
-                        else
-                            echo "  Config 切換確認: ⚠ API 顯示「${new_config}」（目標: ${target_config}）"
-                        fi
-
-                        # 驗證連通性
-                        sleep 3
-                        local status3
-                        status3=$(check_connectivity)
-                        if ! is_down "$status3"; then
-                            echo "  連通性: ✓（${status3}）"
-                            echo "  → TEST 3 PASSED"
-                            passed=$((passed + 1))
-                        else
-                            echo "  連通性: ✗（${status3}，可能新 config 需要手動選節點）"
-                            echo "  → TEST 3 PARTIAL（切換成功但連線需手動）"
-                            passed=$((passed + 1))
-                        fi
+                if switch_config "$target_config"; then
+                    # 驗證 config 是否切換
+                    local new_config
+                    new_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
+                    if [ "$new_config" = "$target_config" ]; then
+                        echo "  Config 切換確認: ✓（當前: ${new_config}）"
                     else
-                        echo "  ✗ 切換後 API 無回應"
-                        echo "  → TEST 3 FAILED"
+                        echo "  Config 切換確認: ⚠ API 顯示「${new_config}」（目標: ${target_config}）"
+                    fi
+
+                    # 驗證連通性
+                    sleep 3
+                    local status3
+                    status3=$(check_connectivity)
+                    if ! is_down "$status3"; then
+                        echo "  連通性: ✓（${status3}）"
+                        echo "  → TEST 3 PASSED"
+                        passed=$((passed + 1))
+                    else
+                        echo "  連通性: ✗（${status3}，可能新 config 需要手動選節點）"
+                        echo "  → TEST 3 PARTIAL（切換成功但連線需手動）"
+                        passed=$((passed + 1))
+                    fi
+
+                    # ── 恢復原始 config ──
+                    echo ""
+                    echo "  [恢復] 切回原始 config: ${test3_original_config}"
+                    if switch_config "$test3_original_config"; then
+                        echo "  [恢復] Config ✓"
+                    else
+                        echo "  [恢復] ⚠ 切換回原始 config 失敗"
+                        echo "  → TEST 3 FAILED（未恢復到原始配置）"
+                        if [ $passed -gt 0 ] 2>/dev/null; then
+                            passed=$((passed - 1))
+                        fi
                         failed=$((failed + 1))
                         overall_pass=false
                     fi
-
-                    # ── 恢復原始 config（帶重試） ──
-                    echo ""
-                    echo "  [恢復] 切回原始 config: ${test3_original_config}"
-                    local restore_ok=false
-
-                    for attempt in 1 2; do
-                        if [ $attempt -gt 1 ]; then
-                            echo "  [恢復] 重試第 ${attempt} 次..."
-                            sleep 5
-                        fi
-
-                        local restore_output restore_rc
-                        restore_output=$("$PYTHON_BIN" "$CONFIG_SWITCHER" "$test3_original_config" 2>&1)
-                        restore_rc=$?
-                        echo "$restore_output" | while IFS= read -r line; do [ -n "$line" ] && echo "    ${line}"; done
-
-                        if [ $restore_rc -ne 0 ]; then
-                            echo "  [恢復] ⚠ 切換指令返回錯誤 (rc=${restore_rc})"
-                            continue
-                        fi
-
-                        echo "  等待 Stash 載入 config（15 秒）..."
-                        sleep 15
-
-                        if ! check_api; then
-                            echo "  [恢復] ⚠ API 無回應，等待 10 秒..."
-                            sleep 10
-                            if ! check_api; then
-                                echo "  [恢復] ✗ API 仍無回應"
-                                continue
-                            fi
-                        fi
-
-                        # 驗證 config 是否切回
-                        local restored_config
-                        restored_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-                        if [ "$restored_config" = "$test3_original_config" ]; then
-                            echo "  [恢復] Config ✓（${restored_config}）"
-                            restore_ok=true
-                            break
-                        else
-                            echo "  [恢復] Config 未切回（當前: ${restored_config:-unknown}，目標: ${test3_original_config}）"
-                        fi
-                    done
-
-                    # 恢復節點（重新檢測 group，因為 config 可能已變化）
-                    if [ -n "$original_node" ]; then
-                        switch_node "$original_node" 5
-
-                        local restored_node
-                        restored_node=$(get_current_node)
-                        if [ "$restored_node" = "$original_node" ]; then
-                            echo "  [恢復] 節點 ✓（${restored_node}）"
-                        elif [ -z "$restored_node" ]; then
-                            echo "  [恢復] 節點 ⚠ 為空（可能配置不匹配）"
-                        else
-                            echo "  [恢復] 節點 ⚠「${restored_node}」≠ 目標「${original_node}」"
-                        fi
-                    fi
-
-                    # 檢查恢復結果
-                    if ! $restore_ok; then
-                        local final_restored_config
-                        final_restored_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-                        if [ "$final_restored_config" != "$test3_original_config" ]; then
-                            echo "  → TEST 3 FAILED（未恢復到原始配置）"
-                            if [ $passed -gt 0 ] 2>/dev/null; then
-                                passed=$((passed - 1))
-                            fi
-                            failed=$((failed + 1))
-                            overall_pass=false
-                        fi
-                    fi
                 else
                     echo "  ✗ Config 切換失敗"
-                    echo "$switch_output" | while IFS= read -r line; do [ -n "$line" ] && echo "    ${line}"; done
                     echo "  → TEST 3 FAILED"
                     failed=$((failed + 1))
                     overall_pass=false
+                fi
+
+                # 恢復節點（config 切換後 group 可能變化）
+                if [ -n "$original_node" ]; then
+                    switch_node "$original_node" 5
+
+                    local restored_node
+                    restored_node=$(get_current_node)
+                    if [ "$restored_node" = "$original_node" ]; then
+                        echo "  [恢復] 節點 ✓（${restored_node}）"
+                    elif [ -z "$restored_node" ]; then
+                        echo "  [恢復] 節點 ⚠ 為空（可能配置不匹配）"
+                    else
+                        echo "  [恢復] 節點 ⚠「${restored_node}」≠ 目標「${original_node}」"
+                    fi
                 fi
             fi
         fi
