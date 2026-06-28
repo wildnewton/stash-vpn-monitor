@@ -109,6 +109,9 @@ ICLOUD_CONFIG_DIR="$HOME/Library/Mobile Documents/iCloud~ws~stash~icloud/Documen
 INSTALL_DIR="$INSTALL_DIR"
 LOG_FILE="$LOG_DIR/vpn_monitor.log"
 
+# 檢查間隔（秒），可透過 vpn_monitor.sh --set-interval 修改
+CHECK_INTERVAL="300"
+
 # Git repo（用於版本檢測與 --update，自動偵測）
 MONITOR_REPO="$SRC_DIR"
 EOF
@@ -137,6 +140,7 @@ echo ""
 echo "[4/8] 生成 LaunchAgent plist..."
 sed -e "s|__SCRIPT_PATH__|$INSTALL_SCRIPT|g" \
     -e "s|__HOME__|$HOME|g" \
+    -e "s|__CHECK_INTERVAL__|${CHECK_INTERVAL:-300}|g" \
     "$SRC_PLIST" > "$INSTALL_PLIST"
 echo "    ✓ $INSTALL_PLIST"
 
@@ -160,7 +164,9 @@ echo "    ✓ LaunchAgent 已啟動"
 echo ""
 echo "[7/8] 驗證..."
 if launchctl list | grep -q "com.user.vpn-monitor" 2>/dev/null; then
-    echo "    ✓ VPN Monitor 正在運行（每 120 秒檢查一次）"
+    local interval_min=$(( ${CHECK_INTERVAL:-300} >= 60 ? ${CHECK_INTERVAL:-300} / 60 : ${CHECK_INTERVAL:-300} ))
+    local interval_unit=$([ ${CHECK_INTERVAL:-300} -ge 60 ] && echo "分鐘" || echo "秒")
+    echo "    ✓ VPN Monitor 正在運行（每 ${interval_min} ${interval_unit}檢查一次）"
 else
     echo "    ⚠️ LaunchAgent 可能未正確載入，請檢查"
 fi

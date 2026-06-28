@@ -19,6 +19,7 @@
 #   ./vpn_monitor.sh --live-test  # 實戰測試（真正切換節點 + 刷新訂閱，事後恢復）
 #   ./vpn_monitor.sh --status     # 顯示當前狀態
 #   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
+#   ./vpn_monitor.sh --set-interval <秒數>  # 設定檢查間隔（e.g. 300 = 5 分鐘）
 #   ./vpn_monitor.sh --stop       # 停止監控（卸載 LaunchAgent）
 #   ./vpn_monitor.sh --start      # 啟動監控（載入 LaunchAgent）
 #   ./vpn_monitor.sh --uninstall [--delete-logs]  # 卸載（預設保留日誌）
@@ -76,6 +77,9 @@ DELAY_TIMEOUT=5000    # 毫秒
 # Retry / interval constants (shared across program)
 RETRY_MAX=5
 RETRY_INTERVAL=3
+
+# LaunchAgent 檢查間隔（秒），可透過 --set-interval 修改
+CHECK_INTERVAL="${CHECK_INTERVAL:-300}"
 
 # ===================== 工具函數 =====================
 
@@ -1283,7 +1287,9 @@ cmd_status() {
     local plist_file="$HOME/Library/LaunchAgents/com.user.vpn-monitor.plist"
     if [ -f "$plist_file" ]; then
         if launchctl print "gui/$(id -u)/com.user.vpn-monitor" >/dev/null 2>&1; then
-            echo "狀態: ✓ 已載入（每 120 秒檢查）"
+            local interval_min=$(( CHECK_INTERVAL >= 60 ? CHECK_INTERVAL / 60 : CHECK_INTERVAL ))
+            local interval_unit=$([ $CHECK_INTERVAL -ge 60 ] && echo "分鐘" || echo "秒")
+            echo "狀態: ✓ 已載入（每 ${interval_min} ${interval_unit}檢查）"
         else
             echo "狀態: ⚠ plist 存在但未載入"
         fi
@@ -1352,6 +1358,112 @@ cmd_update() {
     echo ""
     echo "  LaunchAgent 將在下個週期（最多 120 秒）自動使用新代碼"
     echo "  無需重啟服務 — 每次運行時都會重新讀取腳本檔案"
+}
+
+cmd_set_interval() {
+    local new_interval="$1"
+
+    # 驗證參數
+    if [ -z "$new_interval" ]; then
+        echo "用法: vpn_monitor.sh --set-interval <秒數>"
+        echo "  目前設定: ${CHECK_INTERVAL} 秒（$( (($CHECK_INTERVAL >= 60)) && echo "$((CHECK_INTERVAL/60)) 分鐘" || echo "${CHECK_INTERVAL} 秒")）"
+        echo ""
+        echo "範例:"
+        echo "  vpn_monitor.sh --set-interval 120    # 每 2 分鐘"
+        echo "  vpn_monitor.sh --set-interval 300    # 每 5 分鐘（預設）"
+        echo "  vpn_monitor.sh --set-interval 600    # 每 10 分鐘"
+        return 1
+    fi
+
+    if ! echo "$new_interval" | grep -Eq '^[0-9]+$'; then
+        echo "錯誤: 間隔必須是正整數（秒）"
+        return 1
+    fi
+
+    if [ "$new_interval" -lt 30 ]; then
+        echo "錯誤: 間隔不能少於 30 秒（目前: ${CHECK_INTERVAL}）"
+        return 1
+    fi
+
+    # 1. 更新 config 檔案
+    local config_file="${VPN_MONITOR_CONFIG:-$HOME/.config/vpn_monitor/config}"
+    if [ ! -f "$config_file" ]; then
+        echo "錯誤: 找不到設定檔 $config_file"
+        return 1
+    fi
+
+    echo "========================================="
+    echo " 設定檢查間隔"
+    echo "========================================="
+    echo ""
+    echo "[1/4] 更新設定檔: $config_file"
+
+    # 更新或新增 CHECK_INTERVAL
+    if grep -q '^CHECK_INTERVAL=' "$config_file" 2>/dev/null; then
+        sed -i '' "s/^CHECK_INTERVAL=.*/CHECK_INTERVAL=\"$new_interval\"/" "$config_file"
+    else
+        echo "CHECK_INTERVAL=\"$new_interval\"" >> "$config_file"
+    fi
+    echo "  ✓ CHECK_INTERVAL = $new_interval （$( (($new_interval >= 60)) && echo "$((new_interval/60)) 分鐘" || echo "${new_interval} 秒")）"
+
+    # 2. 重新載入 config（讓目前程序也能讀到新值）
+    set -a; source "$config_file"; set +a
+
+    # 3. 重生 plist
+    echo ""
+    echo "[2/4] 重生 LaunchAgent plist..."
+
+    local repo_dir
+    repo_dir=$(detect_repo)
+    local src_plist
+    if [ -n "$repo_dir" ] && [ -f "$repo_dir/com.user.vpn-monitor.plist" ]; then
+        src_plist="$repo_dir/com.user.vpn-monitor.plist"
+    else
+        echo "  錯誤: 找不到 plist 模板（repo: $repo_dir）"
+        return 1
+    fi
+
+    local install_plist="$HOME/Library/LaunchAgents/com.user.vpn-monitor.plist"
+    sed -e "s|__SCRIPT_PATH__|$SCRIPT_DIR/vpn_monitor.sh|g" \
+         -e "s|__HOME__|$HOME|g" \
+         -e "s|__CHECK_INTERVAL__|$new_interval|g" \
+         "$src_plist" > "$install_plist"
+
+    if [ $? -eq 0 ]; then
+        echo "  ✓ $install_plist"
+    else
+        echo "  ✗ 生成 plist 失敗"
+        return 1
+    fi
+
+    # 4. 重載 LaunchAgent
+    echo ""
+    echo "[3/4] 重載 LaunchAgent..."
+    launchctl bootout "gui/$(id -u)/com.user.vpn-monitor" 2>/dev/null || true
+    sleep 1
+    if launchctl bootstrap "gui/$(id -u)" "$install_plist" 2>&1; then
+        echo "  ✓ LaunchAgent 已重載"
+    else
+        echo "  ✗ 重載失敗（請嘗試手動: launchctl bootstrap gui/$(id -u) $install_plist）"
+        return 1
+    fi
+
+    # 5. 驗證
+    echo ""
+    echo "[4/4] 驗證..."
+    sleep 2
+    if launchctl list | grep -q com.user.vpn-monitor; then
+        echo "  ✓ LaunchAgent 運行中"
+    else
+        echo "  ⚠ LaunchAgent 未出現在列表中（可能仍在啟動）"
+    fi
+
+    echo ""
+    echo "========================================="
+    echo " 完成！新的檢查間隔: $new_interval 秒"
+    echo "========================================="
+    echo ""
+    echo "下次執行將在約 $((new_interval/60)) 分鐘後（或開機時立即執行）"
 }
 
 cmd_stop() {
@@ -1495,12 +1607,13 @@ cmd_uninstall() {
 # ===================== 入口 =====================
 
 case "${1:-}" in
-    --test)       cmd_test ;;
-    --live-test)  cmd_live_test ;;
-    --status)     cmd_status ;;
-    --update)     cmd_update ;;
-    --stop)       cmd_stop ;;
-    --start)      cmd_start ;;
-    --uninstall)  cmd_uninstall "$@" ;;
-    *)            cmd_monitor ;;
+    --test)          cmd_test ;;
+    --live-test)     cmd_live_test ;;
+    --status)        cmd_status ;;
+    --update)        cmd_update ;;
+    --set-interval)  cmd_set_interval "$2" ;;
+    --stop)          cmd_stop ;;
+    --start)         cmd_start ;;
+    --uninstall)     cmd_uninstall "$@" ;;
+    *)               cmd_monitor ;;
 esac

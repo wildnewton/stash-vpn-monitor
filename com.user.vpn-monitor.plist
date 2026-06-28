@@ -11,9 +11,9 @@
         <string>__SCRIPT_PATH__</string>
     </array>
 
-    <!-- 每 120 秒執行一次 -->
+    <!-- 每 N 秒執行一次（由 CHECK_INTERVAL 設定） -->
     <key>StartInterval</key>
-    <integer>120</integer>
+    <integer>__CHECK_INTERVAL__</integer>
 
     <!-- 開機後立即執行一次 -->
     <key>RunAtLoad</key>
