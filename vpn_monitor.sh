@@ -68,6 +68,10 @@ HTTP_TIMEOUT=10       # 秒
 DELAY_TEST_URL="http://www.gstatic.com/generate_204"
 DELAY_TIMEOUT=5000    # 毫秒
 
+# Retry / interval constants (shared across program)
+RETRY_MAX=5
+RETRY_INTERVAL=3
+
 # ===================== 工具函數 =====================
 
 log() {
@@ -206,7 +210,7 @@ get_selectable_nodes() {
 # 切換到指定節點（帶重試，解決重啟後 API 不穩定問題）
 switch_node() {
     local target="$1"
-    local max_retries="${2:-5}"
+    local max_retries="${2:-$RETRY_MAX}"
 
     local i
     for i in $(seq 1 "$max_retries"); do
@@ -230,7 +234,7 @@ switch_node() {
 
         if [ $i -lt "$max_retries" ]; then
             log "    節點切換重試 (${i}/${max_retries})：${current} → ${target}..."
-            sleep 3
+            sleep $RETRY_INTERVAL
         fi
     done
 
@@ -400,18 +404,18 @@ switch_to_best_node() {
     log "    最佳節點: ${best_node}（評分: ${best_score}）"
 
     # 執行切換（switch_node 內部含重試 + 節點名驗證）
-    if ! switch_node "$best_node" 5; then
+    if ! switch_node "$best_node" $RETRY_MAX; then
         log "    警告: 節點切換失敗（目標: ${best_node}）"
         notify "VPN Monitor" "⚠️ 無法切換到 ${best_node}"
         return 1
     fi
     log "    節點切換確認: ${best_node} ✓"
 
-    # 驗證連通性（重試 5 次，每次間隔 3 秒）
+    # 驗證連通性（重試 $RETRY_MAX 次，每次間隔 ${RETRY_INTERVAL} 秒）
     # 切換節點後代理需要時間重建連接，不能只測一次
     local retry=0
-    while [ $retry -lt 5 ]; do
-        sleep 3
+    while [ $retry -lt $RETRY_MAX ]; do
+        sleep $RETRY_INTERVAL
         local cstatus
         cstatus=$(check_connectivity)
         if ! is_down "$cstatus"; then
@@ -421,10 +425,10 @@ switch_to_best_node() {
             return 0
         fi
         retry=$((retry + 1))
-        [ $retry -lt 5 ] && log "    連通性檢查失敗（${retry}/5），重試..."
+        [ $retry -lt $RETRY_MAX ] && log "    連通性檢查失敗（${retry}/${RETRY_MAX}），重試..."
     done
 
-    log "    連通性驗證: ✗（嘗試 5 次後仍失敗）"
+    log "    連通性驗證: ✗（嘗試 ${RETRY_MAX} 次後仍失敗）"
     log "    警告: 已切換到 ${best_node}，但代理暫不可用"
     return 1
 }
@@ -600,10 +604,10 @@ recover() {
     # Step 1: 刷新 config（reload 當前 + 重連當前節點）
     refresh_config
 
-    # 重新檢查（重試 5 次，每次間隔 3s，給代理足夠時間重建）
+    # 重新檢查（重試 $RETRY_MAX 次，每次間隔 ${RETRY_INTERVAL}s，給代理足夠時間重建）
     local retry=0
-    while [ $retry -lt 5 ]; do
-        sleep 3
+    while [ $retry -lt $RETRY_MAX ]; do
+        sleep $RETRY_INTERVAL
         local status
         status=$(check_connectivity)
         if ! is_down "$status"; then
@@ -612,7 +616,7 @@ recover() {
             return 0
         fi
         retry=$((retry + 1))
-        [ $retry -lt 5 ] && log "    config 刷新後連通性檢查失敗（${retry}/5），重試..."
+        [ $retry -lt $RETRY_MAX ] && log "    config 刷新後連通性檢查失敗（${retry}/${RETRY_MAX}），重試..."
     done
 
     log "刷新 config 後仍然斷線，準備切換節點..."
@@ -639,10 +643,10 @@ recover() {
     refresh_subscription
 
     # 刷新後先檢查連通性（訂閱刷新可能直接解決問題）
-    # 重試 5 次（每次間隔 3s），給代理足夠時間重建
+    # 重試 $RETRY_MAX 次（每次間隔 ${RETRY_INTERVAL}s），給代理足夠時間重建
     local retry=0
-    while [ $retry -lt 5 ]; do
-        sleep 3
+    while [ $retry -lt $RETRY_MAX ]; do
+        sleep $RETRY_INTERVAL
         status=$(check_connectivity)
         if ! is_down "$status"; then
             log "恢復成功（刷新訂閱後）✓"
@@ -650,7 +654,7 @@ recover() {
             return 0
         fi
         retry=$((retry + 1))
-        [ $retry -lt 5 ] && log "    刷新後連通性檢查失敗（${retry}/5），重試..."
+        [ $retry -lt $RETRY_MAX ] && log "    刷新後連通性檢查失敗（${retry}/${RETRY_MAX}），重試..."
     done
 
     log "刷新後仍斷線，重新搜尋節點..."
@@ -711,18 +715,12 @@ cmd_monitor() {
         ping_only)
             log "狀態: Ping 正常，HTTP 代理失敗 — VPN 可能斷線"
             log "啟動恢復流程..."
-        if recover; then
-            sleep 3  # 等待 PUT /proxies 的記憶體狀態穩定再重啟
-            restart_stash
-        fi
+            recover
             ;;
         fail)
             log "狀態: 全部檢測失敗 — VPN 已斷線"
             log "啟動恢復流程..."
-        if recover; then
-            sleep 3  # 等待 PUT /proxies 的記憶體狀態穩定再重啟
-            restart_stash
-        fi
+            recover
             ;;
     esac
 
@@ -950,7 +948,7 @@ cmd_live_test() {
         echo "  [恢復] 切回原始節點: ${original_node}（帶重試）..."
         switch_node "$original_node" 5
 
-        # 驗證恢復（在重啟前驗證 — 重啟會抹掉 API 記憶體切換）
+        # 驗證恢復
         local restored_node
         restored_node=$(get_current_node)
         if [ "$restored_node" = "$original_node" ]; then
@@ -959,11 +957,6 @@ cmd_live_test() {
             echo "  [恢復] ⚠ 當前節點為「${restored_node:-empty}」，未正確恢復"
             overall_pass=false
         fi
-
-        # GUI 同步：重啟 Stash 使 GUI 顯示正確節點
-        echo ""
-        echo "  [GUI 同步] 重啟 Stash 以更新 GUI 顯示..."
-        restart_stash
     fi
 
     # ════════════════════════════════════════════
@@ -1192,11 +1185,6 @@ cmd_live_test() {
                             echo "  [恢復] 節點 ⚠「${restored_node}」≠ 目標「${original_node}」"
                         fi
                     fi
-
-                    # 重啟 Stash 使 GUI 同步
-                    echo ""
-                    echo "  [GUI 同步] 重啟 Stash 以同步最終狀態..."
-                    restart_stash
 
                     # 檢查恢復結果
                     if ! $restore_ok; then
