@@ -108,6 +108,9 @@ ICLOUD_CONFIG_DIR="$HOME/Library/Mobile Documents/iCloud~ws~stash~icloud/Documen
 # 安裝與日誌路徑
 INSTALL_DIR="$INSTALL_DIR"
 LOG_FILE="$LOG_DIR/vpn_monitor.log"
+
+# Git repo（用於版本檢測與 --update，自動偵測）
+MONITOR_REPO="$SRC_DIR"
 EOF
     chmod 600 "$CONFIG_FILE"
     echo "    ✓ 已生成: $CONFIG_FILE"

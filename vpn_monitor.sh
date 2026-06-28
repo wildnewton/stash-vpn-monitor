@@ -18,6 +18,7 @@
 #   ./vpn_monitor.sh --test       # 測試模式（不切換節點，只報告）
 #   ./vpn_monitor.sh --live-test  # 實戰測試（真正切換節點 + 刷新訂閱，事後恢復）
 #   ./vpn_monitor.sh --status     # 顯示當前狀態
+#   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
 #   ./vpn_monitor.sh --stop       # 停止監控（卸載 LaunchAgent）
 #   ./vpn_monitor.sh --start      # 啟動監控（載入 LaunchAgent）
 #   ./vpn_monitor.sh --uninstall [--delete-logs]  # 卸載（預設保留日誌）
@@ -52,6 +53,10 @@ SELECTOR_GROUP="${SELECTOR_GROUP:-SsdAirport}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_SWITCHER="$SCRIPT_DIR/stash_switch_config.py"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# Git repo 路徑（用於版本檢測與 --update）
+# 若未設定，自動嘗試 SCRIPT_DIR；若已從 repo 複製到 ~/.local/bin 則需手動設定
+MONITOR_REPO="${MONITOR_REPO:-}"
 STASH_CONFIG_DIR="${STASH_CONFIG_DIR:-$HOME/Library/Group Containers/group.ws.stash.app/stash}"
 STASH_CONFIG="$STASH_CONFIG_DIR/config.yaml"
 
@@ -90,6 +95,13 @@ notify() {
 # 檢查 Python 環境是否可用（command -v 正確搜索 PATH，不用 -x）
 has_python() {
     command -v "${1:-$PYTHON_BIN}" >/dev/null 2>&1
+}
+
+# 自動偵測 git repo 路徑（供版本檢測與 --update 使用）
+detect_repo() {
+    [ -n "${MONITOR_REPO:-}" ] && git -C "$MONITOR_REPO" rev-parse --git-dir >/dev/null 2>&1 && echo "$MONITOR_REPO" && return 0
+    git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1 && echo "$SCRIPT_DIR" && return 0
+    return 1
 }
 
 # URL 編碼（處理 emoji + 中文節點名）
@@ -775,25 +787,17 @@ cmd_test() {
     echo "    路由 group: ${routing_group}（動態檢測）"
     echo "    當前節點: $current"
 
-    # 連通性
+    # 連通性（使用與定期監控相同的 check_connectivity 函數）
     echo ""
     echo "[3] 連通性檢測"
-    echo -n "    Ping $PING_TARGET... "
-    if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$PING_TARGET" >/dev/null 2>&1; then
-        echo "✓"
-    else
-        echo "✗"
-    fi
-
-    echo -n "    HTTP 通過代理... "
-    local http_code
-    http_code=$(curl -s -m "$HTTP_TIMEOUT" -x "http://127.0.0.1:$PROXY_PORT" \
-        -o /dev/null -w "%{http_code}" "$HTTP_URL" 2>/dev/null || echo "000")
-    if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
-        echo "✓ ($http_code)"
-    else
-        echo "✗ ($http_code)"
-    fi
+    local test_status
+    test_status=$(check_connectivity)
+    case "$test_status" in
+        ok)         echo "    Ping $PING_TARGET: ✓" ; echo "    HTTP 通過代理: ✓" ; echo "    結果: 正常 ✓" ;;
+        http_only)  echo "    Ping $PING_TARGET: ✗" ; echo "    HTTP 通過代理: ✓" ; echo "    結果: HTTP 正常（Ping 失敗，可接受）" ;;
+        ping_only)  echo "    Ping $PING_TARGET: ✓" ; echo "    HTTP 通過代理: ✗" ; echo "    結果: ⚠ VPN 代理可能斷線" ;;
+        fail)       echo "    Ping $PING_TARGET: ✗" ; echo "    HTTP 通過代理: ✗" ; echo "    結果: ❌ 完全斷線" ;;
+    esac
 
     # 非 HK 節點測速
     echo ""
@@ -1241,6 +1245,38 @@ cmd_status() {
         fail)       echo "連通性: ✗ 全部失敗" ;;
     esac
 
+    # 腳本版本資訊
+    echo ""
+    echo "=== 腳本版本 ==="
+    local script_mtime
+    script_mtime=$(stat -f "%Sm" "$0" 2>/dev/null || echo "unknown")
+    echo "檔案修改時間: ${script_mtime}"
+
+    local repo
+    repo=$(detect_repo 2>/dev/null)
+    if [ -n "$repo" ]; then
+        local local_hash remote_hash
+        local_hash=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)
+        local_subject=$(git -C "$repo" log -1 --format=%s 2>/dev/null)
+        echo "本地 commit:   ${local_hash:-unknown} — ${local_subject:-}"
+
+        # 檢查遠端是否有更新（帶 timeout 避免卡住）
+        git -C "$repo" fetch origin --quiet 2>/dev/null
+        remote_hash=$(git -C "$repo" rev-parse --short origin/main 2>/dev/null)
+        if [ -n "$remote_hash" ] && [ -n "$local_hash" ]; then
+            if [ "$remote_hash" = "$local_hash" ]; then
+                echo "遠端狀態:     ✓ 已是最新版"
+            else
+                local behind
+                behind=$(git -C "$repo" rev-list --count "$local_hash..origin/main" 2>/dev/null || echo "?")
+                echo "遠端狀態:     ⚠ 落後 ${behind} 個 commit（最新: ${remote_hash}）"
+                echo "執行更新:     vpn_monitor.sh --update"
+            fi
+        fi
+    else
+        echo "Git repo:     ✗ 未偵測到（設定 MONITOR_REPO 或從 repo 目錄執行）"
+    fi
+
     # LaunchAgent 狀態
     echo ""
     echo "=== LaunchAgent ==="
@@ -1263,6 +1299,59 @@ cmd_status() {
     else
         echo "（無日誌）"
     fi
+}
+
+cmd_update() {
+    echo "========================================="
+    echo " 更新 VPN Monitor 腳本"
+    echo "========================================="
+    echo ""
+
+    local repo
+    repo=$(detect_repo 2>/dev/null)
+    if [ -z "$repo" ]; then
+        echo "✗ 無法偵測 git repo"
+        echo "  請設定 MONITOR_REPO 環境變數，或直接從 repo 目錄執行"
+        return 1
+    fi
+    echo "Git repo: ${repo}"
+    echo ""
+
+    # git pull
+    echo "[1/3] 拉取最新代碼..."
+    local pull_out pull_rc
+    pull_out=$(git -C "$repo" pull 2>&1)
+    pull_rc=$?
+    echo "$pull_out" | sed 's/^/  /'
+
+    if [ $pull_rc -ne 0 ]; then
+        echo ""
+        echo "✗ git pull 失敗，請檢查網路或 repo 狀態"
+        return 1
+    fi
+
+    # 取得最新 commit
+    local new_hash new_subject
+    new_hash=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)
+    new_subject=$(git -C "$repo" log -1 --format=%s 2>/dev/null)
+    echo ""
+    echo "[2/3] 複製腳本到 ~/.local/bin/..."
+
+    local dest_dir="${INSTALL_DIR:-$HOME/.local/bin}"
+    local updated=0
+
+    cp "$repo/vpn_monitor.sh" "$dest_dir/vpn_monitor.sh" && updated=$((updated + 1))
+    cp "$repo/stash_switch_config.py" "$dest_dir/stash_switch_config.py" && updated=$((updated + 1))
+
+    echo "  已更新 ${updated} 個檔案"
+    echo ""
+    echo "[3/3] 更新完成！"
+    echo ""
+    echo "  新版本: ${new_hash:-unknown} — ${new_subject:-}"
+    echo "  檔案時間: $(stat -f '%Sm' "$dest_dir/vpn_monitor.sh" 2>/dev/null)"
+    echo ""
+    echo "  LaunchAgent 將在下個週期（最多 120 秒）自動使用新代碼"
+    echo "  無需重啟服務 — 每次運行時都會重新讀取腳本檔案"
 }
 
 cmd_stop() {
@@ -1409,6 +1498,7 @@ case "${1:-}" in
     --test)       cmd_test ;;
     --live-test)  cmd_live_test ;;
     --status)     cmd_status ;;
+    --update)     cmd_update ;;
     --stop)       cmd_stop ;;
     --start)      cmd_start ;;
     --uninstall)  cmd_uninstall "$@" ;;
