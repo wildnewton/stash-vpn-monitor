@@ -74,12 +74,19 @@ def get_all_configs():
     """從 iCloud 目錄讀取所有 config 名稱（不含 .yaml 副檔名）。
 
     支援任意數量的 config，不硬編碼名稱。
+
+    Fallback: 若 iCloud 目錄為空，讀取 CONFIG_NAMES 設定（逗號分隔）。
     """
     configs = []
     if os.path.isdir(ICLOUD_CONFIG_DIR):
         for f in sorted(glob.glob(os.path.join(ICLOUD_CONFIG_DIR, '*.yaml'))):
             name = os.path.basename(f).replace('.yaml', '')
             configs.append(name)
+    # Fallback: CONFIG_NAMES 設定（逗號分隔）
+    if not configs:
+        names = _CFG.get('CONFIG_NAMES', '')
+        if names:
+            configs = [n.strip() for n in names.split(',')]
     return configs
 
 
@@ -126,6 +133,9 @@ def detect_current_config():
     對每個 config 檔案提取其 proxy-group 名稱，
     與 API /proxies 回傳的 groups 做交集比對，
     重疊最多的即為當前 config。
+
+    Fallback: 若 iCloud 目錄為空或無法匹配，
+    讀取 STASH_CONFIG 檔案標頭註釋來判斷 config 名稱。
     """
     import urllib.request, json
 
@@ -137,20 +147,23 @@ def detect_current_config():
         data = json.loads(urllib.request.urlopen(req, timeout=3).read())
         api_groups = set(data.get('proxies', {}).keys())
     except Exception:
-        return 'unknown'
+        return _detect_current_config_from_file()
 
     if not api_groups:
-        return 'unknown'
+        return _detect_current_config_from_file()
 
     all_configs = get_all_configs()
     if not all_configs:
-        return 'unknown'
+        return _detect_current_config_from_file()
 
     best_match = 'unknown'
     best_overlap = 0
 
     for config_name in all_configs:
         filepath = os.path.join(ICLOUD_CONFIG_DIR, config_name + '.yaml')
+        # 若 iCloud yaml 不存在，跳過（將在 fallback 中處理）
+        if not os.path.isfile(filepath):
+            continue
         config_groups = get_config_groups(filepath)
         if not config_groups:
             continue
@@ -160,7 +173,61 @@ def detect_current_config():
             best_overlap = overlap
             best_match = config_name
 
-    return best_match if best_overlap > 0 else 'unknown'
+    if best_overlap > 0:
+        return best_match
+    else:
+        # iCloud yaml 檔案不存在，無法透過 group 匹配
+        return _detect_current_config_from_file()
+
+
+def _detect_current_config_from_file():
+    """Fallback: 從 STASH_CONFIG 檔案標頭註釋判斷當前 config 名稱。
+
+    Stash 訂閱的 config.yaml 開頭通常包含：
+      #SUBSCRIBED <url>   ← URL 尾碼通常為 config 名稱
+      # <ConfigName>        ← 第二行通常為 config 顯示名稱
+    """
+    config_path = _CFG.get('STASH_CONFIG', '')
+    if not config_path or not os.path.isfile(config_path):
+        config_path = os.path.join(
+            _CFG.get('STASH_CONFIG_DIR', ''), 'config.yaml'
+        )
+    if not os.path.isfile(config_path):
+        return 'unknown'
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            # First pass: 找 #!name= 或 #SUBSCRIBED
+            for line in f:
+                line = line.rstrip()
+                if line.startswith('#!name='):
+                    return line.split('=', 1)[1].strip()
+                if line.startswith('#SUBSCRIBED '):
+                    url = line[len('#SUBSCRIBED '):].strip()
+                    fname = os.path.basename(url)
+                    name = fname.replace('.yaml', '').replace('.yml', '')
+                    if name:
+                        return name
+                if not line.startswith('#'):
+                    break
+            # Second pass: 找 config 名稱註釋（跳過 ASCII art）
+            f.seek(0)
+            for line in f:
+                line = line.rstrip()
+                if not line.startswith('#'):
+                    break
+                # 跳過 ASCII art（含 Unicode 方塊字元）
+                if any(c in line for c in '█╗╔╝╚║╩╦╠╣╬░▒▓'):
+                    continue
+                if line.startswith('#SUBSCRIBED') or line.startswith('#!'):
+                    continue
+                # 去除 # 後的內容即為名稱
+                name = line.lstrip('#').strip()
+                if name:
+                    return name
+    except Exception:
+        pass
+    return 'unknown'
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -200,7 +267,7 @@ def get_stash_window():
 
     1. AXFocusedWindow — 最可靠，只要 Stash 有 focus
     2. AXWindows — 原始方式（某些 app 可用）
-    3. Activate + retry — 先把 Stash 帶到前台再試
+    3. Activate + retry — 先把 Stash 帶到前台再試（最常用 fallback）
     4. System-wide AXFocusedApplication — 全域搜尋
     """
     pid = get_stash_pid()
@@ -219,14 +286,15 @@ def get_stash_window():
     if windows:
         return windows[0]
 
-    # Strategy 3: Activate Stash 再重試
-    try:
-        subprocess.run(['osascript', '-e', 'tell application "Stash" to activate'],
-                       capture_output=True, timeout=5)
-        time.sleep(2)
+    # Strategy 3: 積極激活 Stash 再重試（最多 4 次）
+    for attempt in range(4):
+        # 用 open -a 激活（比 osascript 更可靠）
+        subprocess.run(['open', '-a', 'Stash'], capture_output=True)
+        time.sleep(2.5)
 
-        # 重新取得 app element（有時需要重建）
+        # 重建 app element
         app = AX.AXUIElementCreateApplication(pid)
+
         focused = ax_val(app, 'AXFocusedWindow')
         if focused:
             return focused
@@ -234,15 +302,16 @@ def get_stash_window():
         windows = ax_val(app, 'AXWindows') or []
         if windows:
             return windows[0]
-    except Exception:
-        pass
+
+        # 額外等待（第一次 2.5s，之後逐漸增加）
+        if attempt < 3:
+            time.sleep(1.5)
 
     # Strategy 4: System-wide element → AXFocusedApplication
     try:
         system_wide = AX.AXUIElementCreateSystemWide()
         focused_app = ax_val(system_wide, 'AXFocusedApplication')
         if focused_app:
-            # 確認是 Stash
             err, focused_pid = AX.AXUIElementGetPid(focused_app, None)
             if err == 0 and focused_pid == pid:
                 focused_win = ax_val(focused_app, 'AXFocusedWindow')
@@ -268,11 +337,14 @@ def get_stash_window():
 
 def open_configs_page():
     """用 URL scheme 打開 Stash 的 Configs 管理頁面"""
+    # 先確保 Stash 在前台
+    subprocess.run(['open', '-a', 'Stash'], capture_output=True)
+    time.sleep(1)
     subprocess.run(
         ['open', 'stash://install-config?url=http%3A%2F%2Flocalhost%3A19877%2Fplaceholder.yaml'],
         capture_output=True
     )
-    time.sleep(1.5)
+    time.sleep(2.5)
 
 
 def get_config_rows(root_elem):

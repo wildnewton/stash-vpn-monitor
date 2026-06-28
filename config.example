@@ -11,12 +11,34 @@ API_BASE="http://127.0.0.1:9090"
 API_SECRET="your_stash_api_secret_here"
 
 # Python interpreter with pyobjc installed
-# (pip install pyobjc-framework-ApplicationServices pyobjc-framework-Quartz)
+# CAVEAT: Must point to a Python that has pyobjc-framework-ApplicationServices.
+#   System Python (/usr/bin/python3) usually has it pre-installed.
+#   Homebrew / managed Python (e.g. /opt/homebrew/bin/python3) typically does NOT.
+#   If you see "ModuleNotFoundError: No module named 'ApplicationServices'",
+#   either change PYTHON_BIN to /usr/bin/python3, or run:
+#     <your-python> -m pip install pyobjc-framework-ApplicationServices pyobjc-framework-Quartz
 PYTHON_BIN="python3"
 
 # Stash paths
 STASH_CONFIG_DIR="$HOME/Library/Group Containers/group.ws.stash.app/stash"
+# CAVEAT: iCloud Drive "optimized storage" may leave this directory appearing EMPTY
+#   (files exist in iCloud but haven't been downloaded to local disk).
+#   If `vpn_monitor.sh --live-test` shows "no configs found", either:
+#   (a) Open the iCloud Stash folder in Finder to force download, or
+#   (b) Set CONFIG_NAMES below as a fallback (comma-separated config names).
 ICLOUD_CONFIG_DIR="$HOME/Library/Mobile Documents/iCloud~ws~stash~icloud/Documents"
+
+# CAVEAT: Fallback config names when ICLOUD_CONFIG_DIR is empty or inaccessible.
+#   This is used by stash_switch_config.py --list / --status when .yaml files
+#   cannot be read from ICLOUD_CONFIG_DIR.
+#   Example: CONFIG_NAMES="SsdAirport,glados"
+CONFIG_NAMES=""
+
+# CAVEAT: Path to the active Stash config YAML file on disk.
+#   Used as fallback by detect_current_config() when API is unavailable
+#   and ICLOUD_CONFIG_DIR is empty. Points to the symlink/copy that
+#   Stash uses at runtime (usually STASH_CONFIG_DIR/config.yaml).
+STASH_CONFIG="$STASH_CONFIG_DIR/config.yaml"
 
 # Install & log paths
 INSTALL_DIR="$HOME/.local/bin"
