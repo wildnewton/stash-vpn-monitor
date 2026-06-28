@@ -1,0 +1,23 @@
+# VPN Monitor Configuration
+# Copy this file to ~/.config/vpn_monitor/config and fill in your values.
+# Or run install_vpn_monitor.sh to auto-generate it.
+# All values must be double-quoted. Use $HOME instead of ~.
+
+# Stash API connection
+API_BASE="http://127.0.0.1:9090"
+# API secret — found in:
+#   ~/Library/Group Containers/group.ws.stash.app/Library/Preferences/group.ws.stash.app.plist
+#   (key: stash-device-secret)
+API_SECRET="your_stash_api_secret_here"
+
+# Python interpreter with pyobjc installed
+# (pip install pyobjc-framework-ApplicationServices pyobjc-framework-Quartz)
+PYTHON_BIN="python3"
+
+# Stash paths
+STASH_CONFIG_DIR="$HOME/Library/Group Containers/group.ws.stash.app/stash"
+ICLOUD_CONFIG_DIR="$HOME/Library/Mobile Documents/iCloud~ws~stash~icloud/Documents"
+
+# Install & log paths
+INSTALL_DIR="$HOME/.local/bin"
+LOG_FILE="$HOME/Library/Logs/vpn_monitor.log"

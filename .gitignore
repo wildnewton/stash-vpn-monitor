@@ -1,0 +1,19 @@
+# Actual config file (contains API secret)
+.config/
+
+# Logs
+*.log
+*.log.old
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# WorkBuddy internal
+.workbuddy/
+
+# Deprecated / dev-only scripts
+stash_inspect.applescript
