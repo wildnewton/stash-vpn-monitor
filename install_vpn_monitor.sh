@@ -86,7 +86,7 @@ else
             fi
         fi
     done
-    [ -z "$DETECTED_PYTHON" ] && DETECTED_PYTHON="python3"
+    [ -z "$DETECTED_PYTHON" ] && DETECTED_PYTHON=$(command -v python3 2>/dev/null || echo "python3")
 
     cat > "$CONFIG_FILE" << EOF
 # VPN Monitor Configuration

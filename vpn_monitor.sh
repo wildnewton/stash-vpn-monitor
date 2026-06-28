@@ -83,6 +83,11 @@ notify() {
     osascript -e "display notification \"$message\" with title \"$title\"" 2>/dev/null || true
 }
 
+# 檢查 Python 環境是否可用（command -v 正確搜索 PATH，不用 -x）
+has_python() {
+    command -v "${1:-$PYTHON_BIN}" >/dev/null 2>&1
+}
+
 # URL 編碼（處理 emoji + 中文節點名）
 urlencode() {
     jq -rn --arg str "$1" '$str|@uri'
@@ -463,7 +468,7 @@ refresh_subscription() {
 try_alternative_configs() {
     log ">>> Step 4: 遍歷所有備選 config..."
 
-    if [ ! -f "$CONFIG_SWITCHER" ] || [ ! -x "$PYTHON_BIN" ]; then
+    if [ ! -f "$CONFIG_SWITCHER" ] || ! has_python; then
         log "    WARNING: config switcher 或 Python 不可用，跳過"
         return 1
     fi
@@ -905,7 +910,7 @@ cmd_live_test() {
     echo "[前置] 原始節點: ${original_node:-（空）}"
 
     local original_config=""
-    if [ -f "$CONFIG_SWITCHER" ] && [ -x "$PYTHON_BIN" ]; then
+    if [ -f "$CONFIG_SWITCHER" ] && has_python; then
         original_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
         echo "[前置] 原始配置: ${original_config:-unknown}"
     fi
@@ -1042,8 +1047,8 @@ cmd_live_test() {
     if [ ! -f "$CONFIG_SWITCHER" ]; then
         echo "  ✗ stash_switch_config.py 不存在，跳過"
         echo "  → TEST 3 SKIPPED"
-    elif [ ! -x "$PYTHON_BIN" ]; then
-        echo "  ✗ Python 環境不存在，跳過"
+    elif ! has_python; then
+        echo "  ✗ Python 環境不存在（command -v 失敗），跳過"
         echo "  → TEST 3 SKIPPED"
     else
         # 動態檢測當前 config
@@ -1234,7 +1239,7 @@ cmd_live_test() {
     echo "  當前節點: ${final_node}"
     echo "  連通性: ${final_status}"
 
-    if [ -f "$CONFIG_SWITCHER" ] && [ -x "$PYTHON_BIN" ]; then
+    if [ -f "$CONFIG_SWITCHER" ] && has_python; then
         local final_config
         final_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
         echo "  當前配置: ${final_config:-unknown}"
@@ -1274,7 +1279,7 @@ cmd_status() {
     echo "當前節點: $current"
 
     # 顯示當前 config（如果 config switcher 可用）
-    if [ -f "$CONFIG_SWITCHER" ] && [ -x "$PYTHON_BIN" ]; then
+    if [ -f "$CONFIG_SWITCHER" ] && has_python; then
         local current_config
         current_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
         echo "當前配置: ${current_config:-unknown}"
