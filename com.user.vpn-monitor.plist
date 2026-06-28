@@ -19,10 +19,6 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 如果錯過執行時間（如休眠），喚醒後立即補執行 -->
-    <key>StartCalendarInterval</key>
-    <dict/>
-
     <!-- 持續運行（不要因為一次失敗就停止） -->
     <key>KeepAlive</key>
     <false/>
