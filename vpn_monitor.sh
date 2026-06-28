@@ -20,6 +20,8 @@
 #   ./vpn_monitor.sh --status     # 顯示當前狀態
 #   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
 #   ./vpn_monitor.sh --set-interval <秒數>  # 設定檢查間隔（e.g. 300 = 5 分鐘）
+#   ./vpn_monitor.sh --change-config <name>   # 切換 config（切到指定 yaml）
+#   ./vpn_monitor.sh --switch-to-best-node    # 切換到最佳節點（SG > JP > TW > US）
 #   ./vpn_monitor.sh --stop       # 停止監控（卸載 LaunchAgent）
 #   ./vpn_monitor.sh --start      # 啟動監控（載入 LaunchAgent）
 #   ./vpn_monitor.sh --uninstall [--delete-logs]  # 卸載（預設保留日誌）
@@ -1466,6 +1468,149 @@ cmd_set_interval() {
     echo "下次執行將在約 $((new_interval/60)) 分鐘後（或開機時立即執行）"
 }
 
+cmd_change_config() {
+    local target_config="$1"
+
+    echo "========================================="
+    echo " 切換 Config"
+    echo "========================================="
+    echo ""
+
+    # 驗證參數
+    if [ -z "$target_config" ]; then
+        echo "用法: vpn_monitor.sh --change-config <config_name>"
+        echo ""
+        echo "可用 config（透過 stash_switch_config.py --list 査詢）:"
+        if [ -f "$CONFIG_SWITCHER" ] && has_python; then
+            "$PYTHON_BIN" "$CONFIG_SWITCHER" --list 2>/dev/null | while IFS= read -r c; do
+                [ -n "$c" ] && echo "  - $c"
+            done
+        else
+            echo "  （config switcher 或 Python 不可用）"
+        fi
+        return 1
+    fi
+
+    # 檢查依賴
+    if [ ! -f "$CONFIG_SWITCHER" ]; then
+        echo "✗ 錯誤: $CONFIG_SWITCHER 不存在"
+        echo "  無法切換 config（config switcher 功能不可用）"
+        return 1
+    fi
+    if ! has_python; then
+        echo "✗ 錯誤: Python 不可用（$PYTHON_BIN）"
+        echo "  請安裝 pyobjc: $PYTHON_BIN -m pip install pyobjc-framework-ApplicationServices pyobjc-framework-Quartz"
+        return 1
+    fi
+
+    # 檢查 Stash API
+    if ! check_api; then
+        echo "✗ 錯誤: Stash API 無回應（${API_BASE}）"
+        echo "  請確認 Stash 正在執行"
+        return 1
+    fi
+
+    # 顯示當前 config
+    local current_config
+    current_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
+    echo "當前 config: ${current_config:-unknown}"
+    echo "目標 config: ${target_config}"
+    echo ""
+
+    # 執行切換（switch_config 內含: 切換 + sleep 15 + restart_stash + check_api）
+    log "=== 手動切換 config: ${target_config} ==="
+    if switch_config "$target_config"; then
+        echo "✓ Config 切換成功: ${target_config}"
+        log "=== Config 切換完成: ${target_config} ==="
+
+        # 顯示切換後狀態
+        echo ""
+        echo "--- 切換後狀態 ---"
+        local new_config new_group new_node
+        new_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
+        new_group=$(get_routing_group)
+        new_node=$(get_current_node)
+        echo "  Config: ${new_config:-unknown}"
+        echo "  路由 group: ${new_group}"
+        echo "  當前節點: ${new_node:-unknown}"
+
+        # 驗證連通性
+        echo ""
+        local cstatus
+        cstatus=$(check_connectivity)
+        case "$cstatus" in
+            ok)         echo "  連通性: ✓ 正常" ;;
+            http_only)   echo "  連通性: ~ HTTP 正常，Ping 失敗" ;;
+            ping_only)   echo "  連通性: ✗ HTTP 代理失敗" ;;
+            fail)        echo "  連通性: ✗ 全部失敗" ;;
+        esac
+        return 0
+    else
+        echo "✗ Config 切換失敗: ${target_config}"
+        log "=== Config 切換失敗: ${target_config} ==="
+        return 1
+    fi
+}
+
+cmd_switch_to_best_node() {
+    echo "========================================="
+    echo " 切換到最佳節點"
+    echo "========================================="
+    echo ""
+
+    # 檢查 Stash API
+    if ! check_api; then
+        echo "✗ 錯誤: Stash API 無回應（${API_BASE}）"
+        echo "  請確認 Stash 正在執行"
+        return 1
+    fi
+
+    # 顯示當前狀態
+    local current_node current_config
+    current_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
+    current_node=$(get_current_node)
+    local current_group
+    current_group=$(get_routing_group)
+    echo "當前 config: ${current_config:-unknown}"
+    echo "路由 group: ${current_group}"
+    echo "當前節點: ${current_node:-unknown}"
+    echo ""
+
+    # 先試非 HK 節點
+    echo ">>> 階段 1: 搜尋非 HK 最佳節點（SG > JP > TW > US）..."
+    log "=== 手動切換到最佳節點（非 HK）==="
+    if switch_to_best_node false; then
+        echo ""
+        echo "✓ 已切換到最佳節點（非 HK）"
+        local new_node
+        new_node=$(get_current_node)
+        echo "  新節點: ${new_node}"
+        return 0
+    fi
+
+    echo ""
+    echo "⚠ 非 HK 節點皆不可用，嘗試含 HK..."
+    echo ""
+
+    # 再試含 HK
+    echo ">>> 階段 2: 搜尋含 HK 最佳節點（最後手段）..."
+    log "=== 手動切換到最佳節點（含 HK）==="
+    if switch_to_best_node true; then
+        echo ""
+        echo "✓ 已切換到最佳節點（含 HK）"
+        local new_node
+        new_node=$(get_current_node)
+        echo "  新節點: ${new_node}"
+        return 0
+    fi
+
+    echo ""
+    echo "✗ 所有節點皆不可用"
+    echo "  建議: 嘗試切換 config（vpn_monitor.sh --change-config <name>）或刷新訂閱"
+    log "=== 切換到最佳節點失敗: 所有節點皆不可用 ==="
+    return 1
+}
+
 cmd_stop() {
     echo "========================================="
     echo " 停止 VPN 監控"
@@ -1607,13 +1752,15 @@ cmd_uninstall() {
 # ===================== 入口 =====================
 
 case "${1:-}" in
-    --test)          cmd_test ;;
-    --live-test)     cmd_live_test ;;
-    --status)        cmd_status ;;
-    --update)        cmd_update ;;
-    --set-interval)  cmd_set_interval "$2" ;;
-    --stop)          cmd_stop ;;
-    --start)         cmd_start ;;
-    --uninstall)     cmd_uninstall "$@" ;;
-    *)               cmd_monitor ;;
+    --test)               cmd_test ;;
+    --live-test)          cmd_live_test ;;
+    --status)             cmd_status ;;
+    --update)             cmd_update ;;
+    --set-interval)       cmd_set_interval "$2" ;;
+    --change-config)       cmd_change_config "$2" ;;
+    --switch-to-best-node) cmd_switch_to_best_node ;;
+    --stop)               cmd_stop ;;
+    --start)              cmd_start ;;
+    --uninstall)          cmd_uninstall "$@" ;;
+    *)                    cmd_monitor ;;
 esac
