@@ -489,11 +489,33 @@ refresh_subscription() {
 
 # Step 4: 切換 config（共用函數）
 #   切換 config + 等待載入 + 重啟 Stash + 驗證 API
+# 等待 Stash 進程出現（pgrep 可找到），最多等 $1 秒（預設 20）
+# 用途: restart_stash 重啟後，進程可能延遲出現，下一個 switch_config 需等它穩定
+wait_for_stash_process() {
+    local max_wait="${1:-20}"
+    local i=0
+    while [ $i -lt $max_wait ]; do
+        if pgrep -x 'Stash' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    log "  ⚠ 等待 Stash 進程超時（${max_wait}s）"
+    return 1
+}
+
 # 用法: switch_config "target_config"
 # 返回: 0=成功, 1=失敗
 switch_config() {
     local target="$1"
     log "切換 config: ${target}..."
+
+    # 確保 Stash 進程已穩定就緒再操作 UI（前一次 restart_stash 後可能有短暫空窗）
+    if ! wait_for_stash_process 20; then
+        log "  ✗ Stash 進程未就緒，無法切換 config"
+        return 1
+    fi
 
     local switch_output switch_rc
     switch_output=$("$PYTHON_BIN" "$CONFIG_SWITCHER" "$target" 2>&1)
