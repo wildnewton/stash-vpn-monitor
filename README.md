@@ -4,7 +4,7 @@
 
 ## 功能
 
-1. **連通性檢測** — Ping 8.8.8.8 + HTTP 通過代理雙重驗證
+1. **連通性檢測** — Ping 8.8.8.8 + HTTP 通過代理雙重驗證（失敗後重試 5 次，間隔 3 秒，避免短暫波動誤觸發恢復流程）
 2. **自動恢復鏈** — 7 步逐級升級：
    - 刷新 config（reload + 測速重連當前節點）
    - 切換到最佳非 HK 節點（偏好 SG > JP > TW > US）
@@ -30,7 +30,7 @@ cd vpn-monitor
 - 偵測已安裝 pyobjc 的 Python 環境
 - 生成配置檔案 `~/.config/vpn_monitor/config`
 - 複製腳本到 `~/.local/bin/`
-- 載入 LaunchAgent（每 120 秒檢查一次）
+- 載入 LaunchAgent（每 300 秒 / 5 分鐘檢查一次）
 
 ## 配置
 
@@ -45,18 +45,24 @@ cd vpn-monitor
 | `ICLOUD_CONFIG_DIR` | Stash iCloud config 目錄 | `~/Library/Mobile Documents/iCloud~ws~stash~icloud/Documents` |
 | `INSTALL_DIR` | 腳本安裝目錄 | `~/.local/bin` |
 | `LOG_FILE` | 日誌檔案路徑 | `~/Library/Logs/vpn_monitor.log` |
+| `MONITOR_REPO` | Git repo 路徑（版本檢測 / `--update` 用） | 自動偵測 |
+| `CHECK_INTERVAL` | 檢查間隔秒數（`--set-interval` 可動態修改） | `300`（5 分鐘） |
 
 可透過環境變數 `VPN_MONITOR_CONFIG` 指定不同的配置檔案路徑。
 
 ## 使用
 
 ```bash
-vpn_monitor.sh              # 正常監控（LaunchAgent 自動呼叫）
-vpn_monitor.sh --status     # 顯示當前狀態
-vpn_monitor.sh --test       # 測試模式（不切換，只報告）
-vpn_monitor.sh --live-test  # 實戰測試（真正切換 + 恢復）
-vpn_monitor.sh --stop       # 停止監控
-vpn_monitor.sh --start      # 啟動監控
+vpn_monitor.sh                      # 正常監控（LaunchAgent 自動呼叫）
+vpn_monitor.sh --status             # 顯示當前狀態（含版本資訊）
+vpn_monitor.sh --test               # 測試模式（不切換，只報告）
+vpn_monitor.sh --live-test          # 實戰測試（真正切換 + 恢復）
+vpn_monitor.sh --change-config <name>   # 切換 config
+vpn_monitor.sh --switch-to-best-node    # 自動搜尋並切換最佳節點
+vpn_monitor.sh --update             # 用 git pull 更新腳本
+vpn_monitor.sh --set-interval <秒>  # 設定檢查間隔（e.g. 300 = 5 分鐘）
+vpn_monitor.sh --stop               # 停止監控
+vpn_monitor.sh --start              # 啟動監控
 vpn_monitor.sh --uninstall [--delete-logs]  # 完全卸載
 ```
 

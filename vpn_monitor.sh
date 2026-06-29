@@ -801,15 +801,33 @@ cmd_monitor() {
         http_only)
             log "狀態: HTTP 正常，Ping 失敗（可接受）"
             ;;
-        ping_only)
-            log "狀態: Ping 正常，HTTP 代理失敗 — VPN 可能斷線"
-            log "啟動恢復流程..."
-            recover
-            ;;
-        fail)
-            log "狀態: 全部檢測失敗 — VPN 已斷線"
-            log "啟動恢復流程..."
-            recover
+        ping_only|fail)
+            local reason
+            if [ "$status" = "ping_only" ]; then
+                reason="Ping 正常，HTTP 代理失敗"
+            else
+                reason="全部檢測失敗"
+            fi
+            log "狀態: ${reason} — 將重試 ${RETRY_MAX} 次再確認..."
+
+            # 重試確認（避免因短暫波動誤觸發整個恢復流程）
+            local retry=0 final_status=$status
+            while [ $retry -lt $RETRY_MAX ]; do
+                sleep $RETRY_INTERVAL
+                final_status=$(check_connectivity)
+                case "$final_status" in
+                    ok|http_only)
+                        log "  重試 #$((retry+1)): 已恢復 ✓"
+                        break
+                        ;;
+                esac
+                retry=$((retry + 1))
+            done
+
+            if [ "$final_status" = "ping_only" ] || [ "$final_status" = "fail" ]; then
+                log "  ${RETRY_MAX} 次重試後仍失敗，啟動恢復流程..."
+                recover
+            fi
             ;;
     esac
 
