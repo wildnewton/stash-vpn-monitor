@@ -639,8 +639,34 @@ restart_stash() {
         wait_count=$((wait_count + 1))
     done
     echo "  正在啟動 Stash..."
-    log "Stash 已重啟，等待 API 恢復..."
     open -a Stash 2>/dev/null
+
+    # 確認 Stash 進程真正啟動（open -a 可能靜默失敗，e.g. app crash 或被 macOS 拒絕）
+    local proc_ok=0 attempt=0
+    while [ $attempt -lt 3 ]; do
+        local proc_wait=0
+        while [ $proc_wait -lt 10 ]; do
+            if pgrep -x 'Stash$' >/dev/null 2>&1; then
+                proc_ok=1
+                break 2
+            fi
+            sleep 1
+            proc_wait=$((proc_wait + 1))
+        done
+        attempt=$((attempt + 1))
+        log "  Stash 進程未出現（第 ${attempt}/3 次），重新啟動..."
+        echo "  Stash 進程未出現，重新啟動（${attempt}/3）..."
+        open -a Stash 2>/dev/null
+    done
+
+    if [ $proc_ok -eq 0 ]; then
+        log "Stash 無法啟動 — 已嘗試 3 次 ⚠"
+        echo "  ✗ Stash 無法啟動（已嘗試 3 次）"
+        return 1
+    fi
+
+    log "Stash 進程已啟動，等待 API 恢復..."
+    echo "  Stash 進程已啟動 ✓，等待 API 恢復..."
 
     # 等待 API 就緒（最多 20 秒）
     sleep 3
