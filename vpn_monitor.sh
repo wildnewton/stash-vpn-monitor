@@ -20,7 +20,7 @@
 #   ./vpn_monitor.sh --status     # 顯示當前狀態
 #   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
 #   ./vpn_monitor.sh --set-interval <秒數>  # 設定檢查間隔（e.g. 300 = 5 分鐘）
-#   ./vpn_monitor.sh --change-config <name>   # 切換 config（切到指定 yaml）
+#   ./vpn_monitor.sh --change-config [<name>]  # 切換 config（無參數=自動換一個不同 config）
 #   ./vpn_monitor.sh --switch-to-best-node    # 切換到最佳節點（SG > JP > TW > US）
 #   ./vpn_monitor.sh --stop       # 停止監控（卸載 LaunchAgent）
 #   ./vpn_monitor.sh --start      # 啟動監控（載入 LaunchAgent）
@@ -1542,22 +1542,7 @@ cmd_change_config() {
     echo "========================================="
     echo ""
 
-    # 驗證參數
-    if [ -z "$target_config" ]; then
-        echo "用法: vpn_monitor.sh --change-config <config_name>"
-        echo ""
-        echo "可用 config（透過 stash_switch_config.py --list 査詢）:"
-        if [ -f "$CONFIG_SWITCHER" ] && has_python; then
-            "$PYTHON_BIN" "$CONFIG_SWITCHER" --list 2>/dev/null | while IFS= read -r c; do
-                [ -n "$c" ] && echo "  - $c"
-            done
-        else
-            echo "  （config switcher 或 Python 不可用）"
-        fi
-        return 1
-    fi
-
-    # 檢查依賴
+    # 檢查依賴（參數有無都需檢查）
     if [ ! -f "$CONFIG_SWITCHER" ]; then
         echo "✗ 錯誤: $CONFIG_SWITCHER 不存在"
         echo "  無法切換 config（config switcher 功能不可用）"
@@ -1567,6 +1552,44 @@ cmd_change_config() {
         echo "✗ 錯誤: Python 不可用（$PYTHON_BIN）"
         echo "  請安裝 pyobjc: $PYTHON_BIN -m pip install pyobjc-framework-ApplicationServices pyobjc-framework-Quartz"
         return 1
+    fi
+
+    # 若未指定參數，自動選一個不同的 config
+    if [ -z "$target_config" ]; then
+        echo "未指定 config，自動選擇..."
+        echo ""
+
+        # 取得當前 config
+        local auto_current
+        auto_current=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
+        echo "當前 config: ${auto_current:-unknown}"
+
+        # 取得所有可用 config 並排除當前
+        local all_configs
+        local -a alternatives
+        all_configs=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --list 2>/dev/null)
+        alternatives=()
+        while IFS= read -r c; do
+            [ -n "$c" ] && [ "$c" != "$auto_current" ] && alternatives+=("$c")
+        done <<< "$all_configs"
+
+        if [ ${#alternatives[@]} -eq 0 ]; then
+            echo "✗ 沒有其他 config 可切換"
+            return 1
+        fi
+
+        # 若只有 1 個備選直接用，多個則隨機選
+        if [ ${#alternatives[@]} -eq 1 ]; then
+            target_config="${alternatives[0]}"
+            echo "只有 1 個備選: ${target_config}"
+        else
+            local idx
+            idx=$(( RANDOM % ${#alternatives[@]} ))
+            target_config="${alternatives[$idx]}"
+            echo "備選清單 (${#alternatives[@]} 個): ${alternatives[*]}"
+            echo "隨機選取 → ${target_config}"
+        fi
+        echo ""
     fi
 
     # 檢查 Stash API
