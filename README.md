@@ -1,4 +1,8 @@
-# VPN Monitor for Stash
+# AGENTS.md / README.md — Stash VPN Monitor
+
+Profile: trader | 用途: VPN 连線檢測 + 自動恢復
+
+## 概述
 
 自動監控 Stash VPN 連線，斷線時自動恢復：刷新 config → 切換節點 → 刷新訂閱 → 輪詢備選 config。
 
