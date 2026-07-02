@@ -1845,8 +1845,8 @@ case "${1:-}" in
     --live-test)          cmd_live_test ;;
     --status)             cmd_status ;;
     --update)             cmd_update ;;
-    --set-interval)       cmd_set_interval "$2" ;;
-    --change-config)       cmd_change_config "$2" ;;
+    --set-interval)       cmd_set_interval "${2:-}" ;;
+    --change-config)       cmd_change_config "${2:-}" ;;
     --switch-to-best-node) cmd_switch_to_best_node ;;
     --stop)               cmd_stop ;;
     --start)              cmd_start ;;
