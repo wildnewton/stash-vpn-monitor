@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Shell syntax check
+        run: |
+          bash -n vpn_monitor.sh
+          bash -n install_vpn_monitor.sh
+          bash -n tests/test_cli_missing_optional_args.sh
+          bash -n tests/test_ci_workflow.sh
+
+      - name: Python syntax check
+        run: |
+          python3 -m py_compile stash_switch_config.py stash_dump.py
+
+      - name: Regression tests
+        run: |
+          bash tests/test_cli_missing_optional_args.sh
+          bash tests/test_ci_workflow.sh
