@@ -87,7 +87,6 @@ vpn_monitor.sh --uninstall [--delete-logs]  # 完全卸載
 ├── install_vpn_monitor.sh      # 一鍵安裝
 ├── com.user.vpn-monitor.plist  # LaunchAgent 模板
 ├── config.example              # 配置檔案模板
-├── stash_dump.py               # 開發工具：dump AX tree（除錯用）
 └── .gitignore
 ```
 
