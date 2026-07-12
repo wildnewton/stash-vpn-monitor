@@ -6,7 +6,8 @@
 # 功能：
 #   1. 連通性檢測（Ping 8.8.8.8 + HTTP 通過代理）
 #   2. 斷線時先刷新 config（reload + 測速重連當前節點）
-#   3. 仍斷線則測試所有節點延遲，偏好 JP/SG > TW > US > other non-HK > HK
+#   3. 仍斷線則測試所有節點延遲，按分數排序逐一切換並驗證連通性
+#      偏好 JP/SG > TW > US > other non-HK > HK
 #   4. 若所有非 HK 節點皆失敗，才嘗試 HK 節點（最後手段）
 #   5. 若所有節點皆失敗，強制刷新訂閱（重新從機場拉節點列表）再重試
 #   6. 若仍斷線，切換到備份 config（透過 AX API 自動點擊 Stash UI）
@@ -365,15 +366,20 @@ refresh_config() {
 }
 
 # Step 2: 切換到最佳節點（單一排名通道：JP/SG > TW > US > other non-HK > HK）
+# 策略：所有可達節點按分數排序，逐一切換並驗證連通性；
+# 切換成功但連通失敗的節點在本輪被跳過，不重複嘗試。
 switch_to_best_node() {
     log ">>> Step 2: 搜尋最佳節點（JP/SG > TW > US > other non-HK > HK）..."
 
     local current
     current=$(get_current_node)
-    local best_node=""
-    local best_score=999999
     local tested=0
     local reachable=0
+
+    # 收集所有可達節點及其分數，寫入臨時檔案供排序
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap 'rm -f "$tmpfile"' RETURN
 
     while IFS= read -r node; do
         [ -z "$node" ] && continue
@@ -404,49 +410,51 @@ switch_to_best_node() {
         local score=$((tier * 100000 + delay))
 
         log "    ${node}: ${delay}ms（評分: ${score}）"
-
-        if [ "$score" -lt "$best_score" ] 2>/dev/null; then
-            best_score=$score
-            best_node="$node"
-        fi
+        echo "$score $node" >> "$tmpfile"
     done < <(get_selectable_nodes)
 
     log "    測試 ${tested} 個節點，${reachable} 個可達"
 
-    if [ -z "$best_node" ]; then
+    if [ "$reachable" -eq 0 ]; then
         log "    ⚠ 找不到可用的節點"
         return 1
     fi
 
-    log "    最佳節點: ${best_node}（評分: ${best_score}）"
+    # 按分數升序排列（低分優先），逐一切換並驗證連通性
+    local switched=""
+    local cstatus=""
+    local _conn_tmp
+    _conn_tmp=$(mktemp)
+    while read -r score node; do
+        [ -z "$node" ] && continue
 
-    # 執行切換（switch_node 內部含重試 + 節點名驗證）
-    if ! switch_node "$best_node" $RETRY_MAX; then
-        log "    警告: 節點切換失敗（目標: ${best_node}）"
-        notify "VPN Monitor" "⚠️ 無法切換到 ${best_node}"
-        return 1
-    fi
-    log "    節點切換確認: ${best_node} ✓"
+        # 執行切換（switch_node 內部含重試 + 節點名驗證）
+        if ! switch_node "$node" $RETRY_MAX; then
+            log "    警告: 節點切換失敗（目標: ${node}），嘗試下一個"
+            continue
+        fi
+        switched="$node"
+        log "    節點切換確認: ${node} ✓"
 
-    # 驗證連通性（重試 $RETRY_MAX 次，每次間隔 ${RETRY_INTERVAL} 秒）
-    # 切換節點後代理需要時間重建連接，不能只測一次
-    local retry=0
-    while [ $retry -lt $RETRY_MAX ]; do
-        sleep $RETRY_INTERVAL
-        local cstatus
-        cstatus=$(check_connectivity)
+        # 切換成功後立即驗證連通性（僅測一次，不進入重試循環）
+        # 用 temp file 避免 $(...) 子殼層導致的全域計數器遺失
+        check_connectivity > "$_conn_tmp"
+        cstatus=$(cat "$_conn_tmp")
         if ! is_down "$cstatus"; then
             log "    連通性驗證: ✓（${cstatus}）"
-            log "    成功切換到: ${best_node} ✓"
-            notify "VPN Monitor" "🔄 已切換到 ${best_node}"
+            log "    成功切換到: ${node} ✓"
+            notify "VPN Monitor" "🔄 已切換到 ${node}"
+            rm -f "$_conn_tmp"
             return 0
         fi
-        retry=$((retry + 1))
-        [ $retry -lt $RETRY_MAX ] && log "    連通性檢查失敗（${retry}/${RETRY_MAX}），重試..."
-    done
+        log "    連通性驗證失敗（${cstatus}），切換到 ${node} 後不可用，嘗試下一個候選"
+    done < <(sort -n "$tmpfile")
+    rm -f "$_conn_tmp"
 
-    log "    連通性驗證: ✗（嘗試 ${RETRY_MAX} 次後仍失敗）"
-    log "    警告: 已切換到 ${best_node}，但代理暫不可用"
+    if [ -n "$switched" ]; then
+        log "    警告: 已切換到 ${switched}，但代理暫不可用"
+    fi
+    log "    所有可達節點皆已嘗試，恢復失敗 ✗"
     return 1
 }
 
@@ -700,7 +708,7 @@ recover() {
 
     log "刷新 config 後仍然斷線，準備切換節點..."
 
-    # Step 2: 切換到最佳節點（JP/SG > TW > US > other non-HK > HK，內部含連通性驗證 + 重試）
+    # Step 2: 切換到最佳節點（JP/SG > TW > US > other non-HK > HK，按分數排序逐一切換並驗證連通性）
     if switch_to_best_node; then
         log "恢復成功（節點切換後）✓"
         notify "VPN Monitor" "✅ 已透過節點切換恢復"
@@ -729,7 +737,7 @@ recover() {
 
     log "刷新後仍斷線，重新搜尋節點..."
 
-    # 重新搜尋節點（JP/SG > TW > US > other non-HK > HK，內部含連通性驗證 + 重試）
+    # 重新搜尋節點（JP/SG > TW > US > other non-HK > HK，按分數排序逐一切換並驗證連通性）
     if switch_to_best_node; then
         log "恢復成功（刷新 + 節點切換）✓"
         notify "VPN Monitor" "✅ 已透過刷新訂閱 + 節點切換恢復"
