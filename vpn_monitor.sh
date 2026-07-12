@@ -6,7 +6,7 @@
 # 功能：
 #   1. 連通性檢測（Ping 8.8.8.8 + HTTP 通過代理）
 #   2. 斷線時先刷新 config（reload + 測速重連當前節點）
-#   3. 仍斷線則測試所有非 HK 節點延遲，偏好 SG > JP > TW > US
+#   3. 仍斷線則測試所有節點延遲，偏好 JP/SG > TW > US > other non-HK > HK
 #   4. 若所有非 HK 節點皆失敗，才嘗試 HK 節點（最後手段）
 #   5. 若所有節點皆失敗，強制刷新訂閱（重新從機場拉節點列表）再重試
 #   6. 若仍斷線，切換到備份 config（透過 AX API 自動點擊 Stash UI）
@@ -21,7 +21,7 @@
 #   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
 #   ./vpn_monitor.sh --set-interval <秒數>  # 設定檢查間隔（e.g. 300 = 5 分鐘）
 #   ./vpn_monitor.sh --change-config [<name>]  # 切換 config（無參數=自動換一個不同 config）
-#   ./vpn_monitor.sh --switch-to-best-node    # 切換到最佳節點（SG > JP > TW > US）
+#   ./vpn_monitor.sh --switch-to-best-node    # 切換到最佳節點（JP/SG > TW > US > other non-HK > HK）
 #   ./vpn_monitor.sh --stop       # 停止監控（卸載 LaunchAgent）
 #   ./vpn_monitor.sh --start      # 啟動監控（載入 LaunchAgent）
 #   ./vpn_monitor.sh --uninstall [--delete-logs]  # 卸載（預設保留日誌）
@@ -159,6 +159,19 @@ get_routing_group() {
 # 判斷節點是否為 HK
 is_hk_node() {
     echo "$1" | grep -qE "HK|香港"
+}
+
+# 節點優先級 tier（strict priority，lower tier = higher priority）
+# JP/SG(0) > TW(1) > US(2) > other non-HK(3) > HK(9)
+node_priority_tier() {
+    local node="$1"
+    case "$node" in
+        *SG*|*新加坡*|*JP*|*日本*) echo 0 ;;
+        *TW*|*台湾*) echo 1 ;;
+        *US*|*美国*) echo 2 ;;
+        *HK*|*香港*) echo 9 ;;
+        *) echo 3 ;;
+    esac
 }
 
 # ===================== 核心功能 =====================
@@ -351,15 +364,9 @@ refresh_config() {
     sleep 2
 }
 
-# Step 2: 切換到最佳節點
-#   allow_hk=true  → 包含 HK 節點（最後手段）
-#   allow_hk=false → 僅非 HK 節點
+# Step 2: 切換到最佳節點（單一排名通道：JP/SG > TW > US > other non-HK > HK）
 switch_to_best_node() {
-    local allow_hk="${1:-false}"
-    local phase="非 HK"
-    $allow_hk && phase="全部（含 HK）"
-
-    log ">>> Step 2: 搜尋最佳節點（${phase}）..."
+    log ">>> Step 2: 搜尋最佳節點（JP/SG > TW > US > other non-HK > HK）..."
 
     local current
     current=$(get_current_node)
@@ -376,11 +383,6 @@ switch_to_best_node() {
             *剩余流量*|*距离下次*|*套餐到期*|*有超时*|*超时看*|*推荐夸克*|*邮箱*|*官网*|*老版Clash*|*使用文档*|*IOS继续*|*看文档*) continue ;;
         esac
 
-        # 若不允许 HK，跳過 HK 節點
-        if ! $allow_hk && is_hk_node "$node"; then
-            continue
-        fi
-
         # 跳過當前節點
         [ "$node" = "$current" ] && continue
 
@@ -396,15 +398,10 @@ switch_to_best_node() {
 
         reachable=$((reachable + 1))
 
-        # 計算評分 = 延遲 + 區域偏好加成
-        local region_bonus=100
-        case "$node" in
-            *SG*|*新加坡*) region_bonus=0 ;;
-            *JP*|*日本*)   region_bonus=20 ;;
-            *TW*|*台湾*)   region_bonus=50 ;;
-            *US*|*美国*)   region_bonus=80 ;;
-        esac
-        local score=$((delay + region_bonus))
+        # Strict priority tiers: JP/SG(0) > TW(1) > US(2) > other(3) > HK(9)
+        local tier
+        tier=$(node_priority_tier "$node")
+        local score=$((tier * 100000 + delay))
 
         log "    ${node}: ${delay}ms（評分: ${score}）"
 
@@ -417,7 +414,7 @@ switch_to_best_node() {
     log "    測試 ${tested} 個節點，${reachable} 個可達"
 
     if [ -z "$best_node" ]; then
-        log "    ⚠ 找不到可用的節點（allow_hk=${allow_hk}）"
+        log "    ⚠ 找不到可用的節點"
         return 1
     fi
 
@@ -578,17 +575,10 @@ try_alternative_configs() {
 
         log "    ${alt_config} 載入成功，搜尋節點..."
 
-        # 先試非 HK 節點（switch_to_best_node 內部含連通性驗證）
-        if switch_to_best_node false; then
-            log "恢復成功（${alt_config} + 非 HK 節點）✓"
+        # 搜尋節點（JP/SG > TW > US > other non-HK > HK，內部含連通性驗證）
+        if switch_to_best_node; then
+            log "恢復成功（${alt_config} + 節點切換）✓"
             notify "VPN Monitor" "✅ 已切換到 ${alt_config} 恢復"
-            return 0
-        fi
-
-        # 試 HK 節點（最後手段，switch_to_best_node 內部含連通性驗證）
-        if switch_to_best_node true; then
-            log "恢復成功（${alt_config} + HK 節點）✓"
-            notify "VPN Monitor" "✅ 已切換到 ${alt_config}（HK 節點）恢復"
             return 0
         fi
 
@@ -710,19 +700,10 @@ recover() {
 
     log "刷新 config 後仍然斷線，準備切換節點..."
 
-    # Step 2: 切換到最佳「非 HK」節點（內部含連通性驗證 + 重試）
-    if switch_to_best_node false; then
-        log "恢復成功（非 HK 節點切換後）✓"
-        notify "VPN Monitor" "✅ 已透過切換非 HK 節點恢復"
-        return 0
-    fi
-
-    log "所有非 HK 節點皆失敗，嘗試 HK 節點（最後手段）..."
-
-    # Step 3: 嘗試 HK 節點（最後手段，內部含連通性驗證 + 重試）
-    if switch_to_best_node true; then
-        log "恢復成功（HK 節點切換後）✓"
-        notify "VPN Monitor" "✅ 已透過 HK 節點恢復（最後手段）"
+    # Step 2: 切換到最佳節點（JP/SG > TW > US > other non-HK > HK，內部含連通性驗證 + 重試）
+    if switch_to_best_node; then
+        log "恢復成功（節點切換後）✓"
+        notify "VPN Monitor" "✅ 已透過節點切換恢復"
         return 0
     fi
 
@@ -748,17 +729,10 @@ recover() {
 
     log "刷新後仍斷線，重新搜尋節點..."
 
-    # 先試非 HK（內部含連通性驗證 + 重試）
-    if switch_to_best_node false; then
-        log "恢復成功（刷新 + 非 HK 節點）✓"
+    # 重新搜尋節點（JP/SG > TW > US > other non-HK > HK，內部含連通性驗證 + 重試）
+    if switch_to_best_node; then
+        log "恢復成功（刷新 + 節點切換）✓"
         notify "VPN Monitor" "✅ 已透過刷新訂閱 + 節點切換恢復"
-        return 0
-    fi
-
-    # 最後手段：刷新後的 HK（內部含連通性驗證 + 重試）
-    if switch_to_best_node true; then
-        log "恢復成功（刷新 + HK 節點）✓"
-        notify "VPN Monitor" "✅ 已透過刷新訂閱 + HK 節點恢復"
         return 0
     fi
 
@@ -871,9 +845,9 @@ cmd_test() {
         fail)       echo "    Ping $PING_TARGET: ✗" ; echo "    HTTP 通過代理: ✗" ; echo "    結果: ❌ 完全斷線" ;;
     esac
 
-    # 非 HK 節點測速
+    # 統一節點測速（JP/SG > TW > US > other non-HK > HK）
     echo ""
-    echo "[4] 非 HK 節點測速（偏好 SG > JP > TW > US）"
+    echo "[4] 節點測速（JP/SG > TW > US > other non-HK > HK）"
     echo "    -------------------------------------------"
 
     local best_node=""
@@ -886,28 +860,21 @@ cmd_test() {
             *剩余流量*|*距离下次*|*套餐到期*|*有超时*|*超时看*|*推荐夸克*|*邮箱*|*官网*|*老版Clash*|*使用文档*|*IOS继续*|*看文档*) continue ;;
         esac
 
-        if is_hk_node "$node"; then
-            echo "    $node: 跳過（HK）"
-            continue
-        fi
-
         local delay
         delay=$(test_node_delay "$node")
-
-        local region_bonus=100
-        local tag=""
-        case "$node" in
-            *SG*|*新加坡*) region_bonus=0;  tag="★" ;;
-            *JP*|*日本*)   region_bonus=20; tag="★" ;;
-            *TW*|*台湾*)   region_bonus=50; tag="" ;;
-            *US*|*美国*)   region_bonus=80; tag="" ;;
-        esac
 
         if ! echo "$delay" | grep -qE '^[0-9]+$'; then
             delay=0
         fi
 
-        local score=$((delay + region_bonus))
+        # Strict priority tiers: JP/SG(0) > TW(1) > US(2) > other(3) > HK(9)
+        local tier
+        tier=$(node_priority_tier "$node")
+        local score=$((tier * 100000 + delay))
+        local tag=""
+        case "$tier" in
+            0) tag="★" ;;
+        esac
 
         if [ "$delay" -gt 0 ] 2>/dev/null; then
             printf "    %s: %dms (評分: %d) %s\n" "$node" "$delay" "$score" "$tag"
@@ -922,55 +889,9 @@ cmd_test() {
 
     echo "    -------------------------------------------"
     if [ -n "${best_node}" ]; then
-        echo "    → 最佳非 HK 節點: ${best_node}（評分: ${best_score}）"
+        echo "    → 最佳節點: ${best_node}（評分: ${best_score}）"
     else
-        echo "    → 沒有可用的非 HK 節點"
-    fi
-
-    # HK 節點測速（僅顯示，不切換）
-    echo ""
-    echo "[5] HK 節點測速（僅顯示，作為最後手段參考）"
-    echo "    -------------------------------------------"
-
-    best_node=""
-    best_score=999999
-
-    while IFS= read -r node; do
-        [ -z "$node" ] && continue
-
-        case "$node" in
-            *剩余流量*|*距离下次*|*套餐到期*|*有超时*|*超时看*|*推荐夸克*|*邮箱*|*官网*|*老版Clash*|*使用文档*|*IOS继续*|*看文档*) continue ;;
-        esac
-
-        if ! is_hk_node "$node"; then
-            continue
-        fi
-
-        local delay
-        delay=$(test_node_delay "$node")
-
-        if ! echo "$delay" | grep -qE '^[0-9]+$'; then
-            delay=0
-        fi
-
-        local score=$((delay + 200))  # HK 額外加分，確保排後
-
-        if [ "$delay" -gt 0 ] 2>/dev/null; then
-            printf "    %s: %dms (評分: %d)\n" "$node" "$delay" "$score"
-            if [ "$score" -lt "$best_score" ] 2>/dev/null; then
-                best_score=$score
-                best_node="$node"
-            fi
-        else
-            printf "    %s: 無法連接 ✗\n" "$node"
-        fi
-    done < <(get_proxy_nodes)
-
-    echo "    -------------------------------------------"
-    if [ -n "${best_node}" ]; then
-        echo "    → 最佳 HK 節點: ${best_node}"
-    else
-        echo "    → 沒有可用的 HK 節點"
+        echo "    → 沒有可用的節點"
     fi
 
     echo ""
@@ -1029,8 +950,8 @@ cmd_live_test() {
 
     # 使用 switch_to_best_node（與恢復流程相同策略，測試真實路徑）
     # 內部含節點名驗證 + 連通性重試驗證
-    echo "  使用 switch_to_best_node 切換到最佳非 HK 節點（與恢復流程相同）..."
-    if switch_to_best_node false; then
+    echo "  使用 switch_to_best_node 切換到最佳節點（與恢復流程相同）..."
+    if switch_to_best_node; then
         echo "  → TEST 1 PASSED"
         passed=$((passed + 1))
     else
@@ -1665,28 +1586,11 @@ cmd_switch_to_best_node() {
     echo "當前節點: ${current_node:-unknown}"
     echo ""
 
-    # 先試非 HK 節點
-    echo ">>> 階段 1: 搜尋非 HK 最佳節點（SG > JP > TW > US）..."
-    log "=== 手動切換到最佳節點（非 HK）==="
-    if switch_to_best_node false; then
+    echo ">>> 搜尋最佳節點（JP/SG > TW > US > other non-HK > HK）..."
+    log "=== 手動切換到最佳節點 ==="
+    if switch_to_best_node; then
         echo ""
-        echo "✓ 已切換到最佳節點（非 HK）"
-        local new_node
-        new_node=$(get_current_node)
-        echo "  新節點: ${new_node}"
-        return 0
-    fi
-
-    echo ""
-    echo "⚠ 非 HK 節點皆不可用，嘗試含 HK..."
-    echo ""
-
-    # 再試含 HK
-    echo ">>> 階段 2: 搜尋含 HK 最佳節點（最後手段）..."
-    log "=== 手動切換到最佳節點（含 HK）==="
-    if switch_to_best_node true; then
-        echo ""
-        echo "✓ 已切換到最佳節點（含 HK）"
+        echo "✓ 已切換到最佳節點"
         local new_node
         new_node=$(get_current_node)
         echo "  新節點: ${new_node}"
