@@ -11,10 +11,10 @@ Profile: trader | 用途: VPN 连線檢測 + 自動恢復
 1. **連通性檢測** — Ping 8.8.8.8 + HTTP 通過代理雙重驗證（失敗後重試 5 次，間隔 3 秒，避免短暫波動誤觸發恢復流程）
 2. **自動恢復鏈** — 7 步逐級升級：
    - 刷新 config（reload + 測速重連當前節點）
-   - 切換到最佳非 HK 節點（偏好 SG > JP > TW > US）
-   - 嘗試 HK 節點（最後手段）
+   - 切換到最佳節點（JP/SG > TW > US > other non-HK > HK，單一排名通道）
+   - 所有節點按統一政策排名，HK 因 bonus=200 自然排在最後
    - 強制刷新訂閱（重新從機場拉節點列表）
-   - 刷新後重試非 HK → HK 節點
+   - 刷新後按統一政策重試節點
    - 輪詢所有備選 config，逐個嘗試節點切換
    - 全部失敗 → 通知手動處理
 3. **Config 切換** — 透過 macOS Accessibility API 自動點擊 Stash UI 切換 config
