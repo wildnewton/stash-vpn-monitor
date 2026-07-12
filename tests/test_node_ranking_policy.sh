@@ -2,11 +2,10 @@
 set -euo pipefail
 
 # =============================================================
-# Node Ranking Policy Tests — RED phase (behavioral) + GREEN phase (structural)
+# Node Ranking Policy Tests — behavioral + structural
 #
-# RED: Source production functions, mock dependencies, test runtime ranking
-# GREEN: Verify structural properties (no allow_hk, single pass, log messages)
-# Compatible with bash 3.2+ (macOS default)
+# Source production functions, mock dependencies, and test runtime ranking.
+# Compatible with bash 3.2+ (macOS default).
 # =============================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +16,7 @@ if [[ ! -f "$SCRIPT" ]]; then
     exit 1
 fi
 
-# ── RED phase: Source production functions with mocks ──
+# ── Source production functions with mocks ──
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -120,9 +119,9 @@ echo "=== Node Ranking Policy Tests ==="
 echo ""
 
 # ════════════════════════════════════════════
-# RED: Behavioral tests — actual ranking logic
+# Behavioral tests — actual ranking logic
 # ════════════════════════════════════════════
-echo "[RED] Behavioral ranking tests"
+echo "[Behavioral] ranking policy tests"
 
 # Test 1: JP and SG are same priority tier; lower measured delay wins.
 echo "  Test 1: JP/SG same tier, lower delay wins"
@@ -142,8 +141,17 @@ set_delay "SG-faster" 100
 switch_to_best_node
 assert_selected "SG-faster"
 
-# Test 3: HK is eligible, but only after all non-HK candidates fail.
-echo "  Test 3: HK eligible when non-HK all dead"
+# Test 3: A reachable JP/SG node beats a faster lower-tier node.
+echo "  Test 3: reachable JP/SG beats faster lower-tier node"
+reset_case
+SELECTABLE_NODES=$'TW-fast\nJP-slow'
+set_delay "TW-fast" 100
+set_delay "JP-slow" 900
+switch_to_best_node
+assert_selected "JP-slow"
+
+# Test 4: HK is still eligible, but only after all non-HK candidates fail.
+echo "  Test 4: HK eligible when non-HK all dead"
 reset_case
 SELECTABLE_NODES=$'JP-dead\nUS-dead\nHK-live'
 set_delay "JP-dead" 0
@@ -152,17 +160,17 @@ set_delay "HK-live" 90
 switch_to_best_node
 assert_selected "HK-live"
 
-# Test 4: A reachable non-HK beats a faster HK because HK is last-resort.
-echo "  Test 4: Non-HK beats faster HK (HK last resort)"
+# Test 5: A reachable non-HK beats a much faster HK because HK is last-resort.
+echo "  Test 5: Non-HK beats much faster HK (HK last resort)"
 reset_case
-SELECTABLE_NODES=$'HK-fast\nTW-ok'
+SELECTABLE_NODES=$'HK-fast\nTW-slow'
 set_delay "HK-fast" 20
-set_delay "TW-ok" 100
+set_delay "TW-slow" 900
 switch_to_best_node
-assert_selected "TW-ok"
+assert_selected "TW-slow"
 
-# Test 5: TW beats US when delays equal (TW bonus=50 < US bonus=80)
-echo "  Test 5: TW preferred over US at equal delay"
+# Test 6: TW beats US when delays equal.
+echo "  Test 6: TW preferred over US at equal delay"
 reset_case
 SELECTABLE_NODES=$'US-node\nTW-node'
 set_delay "US-node" 100
@@ -170,21 +178,21 @@ set_delay "TW-node" 100
 switch_to_best_node
 assert_selected "TW-node"
 
-# Test 6: Other non-HK (default bonus=100) beats HK (bonus=200)
-echo "  Test 6: Other non-HK beats HK"
+# Test 7: Other non-HK beats much faster HK.
+echo "  Test 7: Other non-HK beats much faster HK"
 reset_case
-SELECTABLE_NODES=$'HK-fast\nDE-mid'
-set_delay "HK-fast" 30
-set_delay "DE-mid" 80
+SELECTABLE_NODES=$'HK-fast\nDE-slow'
+set_delay "HK-fast" 20
+set_delay "DE-slow" 900
 switch_to_best_node
-assert_selected "DE-mid"
+assert_selected "DE-slow"
 
 echo ""
 
 # ════════════════════════════════════════════
-# GREEN: Structural tests — function properties
+# Structural tests — function properties
 # ════════════════════════════════════════════
-echo "[GREEN] Structural property tests"
+echo "[Structural] function property tests"
 
 # Verify no allow_hk parameter in function signature
 sig=$(sed -n '/^switch_to_best_node() {/,/^log "/p' "$SCRIPT" | head -5 || true)
