@@ -41,10 +41,13 @@ RETRY_INTERVAL=0
 log() { :; }
 notify() { :; }
 get_current_node() { echo "CURRENT"; }
-check_connectivity() { echo "ok"; }
 
 SELECTABLE_NODES=""
 SWITCHED_NODE=""
+SWITCHED_NODES=()
+CONNECTION_STATUSES=()
+CONNECTION_INDEX=0
+CHECK_CONNECTIVITY_CALLS=0
 
 # Simple delay map using two parallel arrays (bash 3.2 compatible)
 NODE_NAMES=()
@@ -68,6 +71,12 @@ get_delay() {
     echo "0"
 }
 
+set_connectivity_statuses() {
+    CONNECTION_STATUSES=("$@")
+    CONNECTION_INDEX=0
+    CHECK_CONNECTIVITY_CALLS=0
+}
+
 get_selectable_nodes() {
     printf '%s\n' "$SELECTABLE_NODES"
 }
@@ -80,14 +89,42 @@ test_node_delay() {
 switch_node() {
     local target="$1"
     SWITCHED_NODE="$target"
+    SWITCHED_NODES+=("$target")
     return 0
+}
+
+check_connectivity() {
+    CHECK_CONNECTIVITY_CALLS=$((CHECK_CONNECTIVITY_CALLS + 1))
+    local status="ok"
+    if [[ "$CONNECTION_INDEX" -lt "${#CONNECTION_STATUSES[@]}" ]]; then
+        status="${CONNECTION_STATUSES[$CONNECTION_INDEX]}"
+    fi
+    CONNECTION_INDEX=$((CONNECTION_INDEX + 1))
+    echo "$status"
 }
 
 reset_case() {
     SELECTABLE_NODES=""
     SWITCHED_NODE=""
+    SWITCHED_NODES=()
+    CONNECTION_STATUSES=()
+    CONNECTION_INDEX=0
+    CHECK_CONNECTIVITY_CALLS=0
     NODE_NAMES=()
     NODE_DELAYS=()
+}
+
+switch_history() {
+    local item
+    local result=""
+    for item in "${SWITCHED_NODES[@]}"; do
+        if [[ -z "$result" ]]; then
+            result="$item"
+        else
+            result="$result,$item"
+        fi
+    done
+    echo "$result"
 }
 
 assert_selected() {
@@ -98,6 +135,28 @@ assert_selected() {
         exit 1
     fi
     echo "  ✓ $expected selected"
+}
+
+assert_switch_history() {
+    local expected="$1"
+    local actual
+    actual=$(switch_history)
+    if [[ "$actual" != "$expected" ]]; then
+        echo "FAIL: Expected switch history: $expected" >&2
+        echo "      Actual switch history:   ${actual:-<none>}" >&2
+        exit 1
+    fi
+    echo "  ✓ switch history: $expected"
+}
+
+assert_connectivity_checks() {
+    local expected="$1"
+    if [[ "$CHECK_CONNECTIVITY_CALLS" -ne "$expected" ]]; then
+        echo "FAIL: Expected connectivity checks: $expected" >&2
+        echo "      Actual connectivity checks:   $CHECK_CONNECTIVITY_CALLS" >&2
+        exit 1
+    fi
+    echo "  ✓ connectivity checks: $expected"
 }
 
 PASS=0
@@ -186,6 +245,84 @@ set_delay "HK-fast" 20
 set_delay "DE-slow" 900
 switch_to_best_node
 assert_selected "DE-slow"
+
+echo ""
+
+# ════════════════════════════════════════════
+# Post-switch connectivity retry tests — issue #6
+# ════════════════════════════════════════════
+echo "[Behavioral] post-switch connectivity retry tests"
+
+# Test 8: Selector changes to target node and connection check passes => success.
+echo "  Test 8: switched node passes connectivity check"
+reset_case
+SELECTABLE_NODES=$'JP-ok'
+set_delay "JP-ok" 100
+set_connectivity_statuses ok
+if ! switch_to_best_node; then
+    echo "FAIL: Expected node switch to succeed when connectivity passes" >&2
+    exit 1
+fi
+assert_selected "JP-ok"
+assert_switch_history "JP-ok"
+assert_connectivity_checks 1
+
+# Test 9: First switched node fails connection check; next candidate passes => success.
+echo "  Test 9: retry next candidate after post-switch connectivity failure"
+reset_case
+SELECTABLE_NODES=$'JP-bad\nSG-good'
+set_delay "JP-bad" 100
+set_delay "SG-good" 120
+set_connectivity_statuses fail ok
+if ! switch_to_best_node; then
+    echo "FAIL: Expected second candidate to recover after first candidate fails connectivity" >&2
+    exit 1
+fi
+assert_selected "SG-good"
+assert_switch_history "JP-bad,SG-good"
+assert_connectivity_checks 2
+
+# Test 10: Failed candidate is not retried in the same recovery round.
+echo "  Test 10: failed candidate is not retried in same recovery round"
+reset_case
+SELECTABLE_NODES=$'JP-bad\nTW-good'
+set_delay "JP-bad" 100
+set_delay "TW-good" 200
+set_connectivity_statuses fail ok
+if ! switch_to_best_node; then
+    echo "FAIL: Expected next ranked candidate to succeed" >&2
+    exit 1
+fi
+assert_switch_history "JP-bad,TW-good"
+
+# Test 11: All candidates switch but fail connectivity => overall failure.
+echo "  Test 11: all switched candidates fail connectivity"
+reset_case
+SELECTABLE_NODES=$'JP-bad\nSG-bad'
+set_delay "JP-bad" 100
+set_delay "SG-bad" 120
+set_connectivity_statuses fail fail
+if switch_to_best_node; then
+    echo "FAIL: Expected node recovery to fail when every candidate fails connectivity" >&2
+    exit 1
+fi
+assert_switch_history "JP-bad,SG-bad"
+assert_connectivity_checks 2
+
+# Test 12: HK remains last even in retry flow, but is used after non-HK fails.
+echo "  Test 12: HK remains last and is used only after non-HK fails connectivity"
+reset_case
+SELECTABLE_NODES=$'HK-fast\nTW-bad'
+set_delay "HK-fast" 20
+set_delay "TW-bad" 900
+set_connectivity_statuses fail ok
+if ! switch_to_best_node; then
+    echo "FAIL: Expected HK to be tried only after non-HK fails connectivity" >&2
+    exit 1
+fi
+assert_selected "HK-fast"
+assert_switch_history "TW-bad,HK-fast"
+assert_connectivity_checks 2
 
 echo ""
 
