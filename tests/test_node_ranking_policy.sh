@@ -112,6 +112,7 @@ reset_case() {
     CHECK_CONNECTIVITY_CALLS=0
     NODE_NAMES=()
     NODE_DELAYS=()
+    RETRY_MAX=1
 }
 
 switch_history() {
@@ -280,6 +281,22 @@ if ! switch_to_best_node; then
 fi
 assert_selected "SG-good"
 assert_switch_history "JP-bad,SG-good"
+assert_connectivity_checks 2
+
+# Test 9a: Per-candidate connectivity retry is preserved before moving to next node.
+echo "  Test 9a: preserve per-candidate connectivity retry before trying next candidate"
+reset_case
+RETRY_MAX=2
+SELECTABLE_NODES=$'JP-eventually-ok\nSG-good'
+set_delay "JP-eventually-ok" 100
+set_delay "SG-good" 120
+set_connectivity_statuses fail ok
+if ! switch_to_best_node; then
+    echo "FAIL: Expected first candidate to recover on connectivity retry" >&2
+    exit 1
+fi
+assert_selected "JP-eventually-ok"
+assert_switch_history "JP-eventually-ok"
 assert_connectivity_checks 2
 
 # Test 10: Failed candidate is not retried in the same recovery round.
