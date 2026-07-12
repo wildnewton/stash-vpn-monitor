@@ -161,6 +161,19 @@ is_hk_node() {
     echo "$1" | grep -qE "HK|香港"
 }
 
+# 節點優先級 tier（strict priority，lower tier = higher priority）
+# JP/SG(0) > TW(1) > US(2) > other non-HK(3) > HK(9)
+node_priority_tier() {
+    local node="$1"
+    case "$node" in
+        *SG*|*新加坡*|*JP*|*日本*) echo 0 ;;
+        *TW*|*台湾*) echo 1 ;;
+        *US*|*美国*) echo 2 ;;
+        *HK*|*香港*) echo 9 ;;
+        *) echo 3 ;;
+    esac
+}
+
 # ===================== 核心功能 =====================
 
 # 取得當前選中節點（使用動態檢測的路由 group）
@@ -385,16 +398,10 @@ switch_to_best_node() {
 
         reachable=$((reachable + 1))
 
-        # Region bonuses — JP and SG are equal tier-0:
-        local region_bonus=100
-        case "$node" in
-            *SG*|*新加坡*) region_bonus=0 ;;
-            *JP*|*日本*)   region_bonus=0 ;;
-            *TW*|*台湾*)   region_bonus=50 ;;
-            *US*|*美国*)   region_bonus=80 ;;
-            *HK*|*香港*)   region_bonus=200 ;;
-        esac
-        local score=$((delay + region_bonus))
+        # Strict priority tiers: JP/SG(0) > TW(1) > US(2) > other(3) > HK(9)
+        local tier
+        tier=$(node_priority_tier "$node")
+        local score=$((tier * 100000 + delay))
 
         log "    ${node}: ${delay}ms（評分: ${score}）"
 
@@ -860,18 +867,14 @@ cmd_test() {
             delay=0
         fi
 
-        # Region bonuses — JP and SG are equal tier-0:
-        local region_bonus=100
+        # Strict priority tiers: JP/SG(0) > TW(1) > US(2) > other(3) > HK(9)
+        local tier
+        tier=$(node_priority_tier "$node")
+        local score=$((tier * 100000 + delay))
         local tag=""
-        case "$node" in
-            *SG*|*新加坡*) region_bonus=0;  tag="★" ;;
-            *JP*|*日本*)   region_bonus=0;  tag="★" ;;
-            *TW*|*台湾*)   region_bonus=50; tag="" ;;
-            *US*|*美国*)   region_bonus=80; tag="" ;;
-            *HK*|*香港*)   region_bonus=200; tag="" ;;
+        case "$tier" in
+            0) tag="★" ;;
         esac
-
-        local score=$((delay + region_bonus))
 
         if [ "$delay" -gt 0 ] 2>/dev/null; then
             printf "    %s: %dms (評分: %d) %s\n" "$node" "$delay" "$score" "$tag"
