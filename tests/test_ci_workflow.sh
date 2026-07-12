@@ -34,5 +34,6 @@ assert_contains "bash -n install_vpn_monitor.sh"
 assert_contains "python3 -m py_compile stash_switch_config.py stash_dump.py"
 assert_contains "bash tests/test_cli_missing_optional_args.sh"
 assert_contains "bash tests/test_ci_workflow.sh"
+assert_contains "bash tests/test_node_ranking_policy.sh"
 
 echo "CI workflow test passed"
