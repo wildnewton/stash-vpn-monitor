@@ -436,10 +436,20 @@ switch_to_best_node() {
         switched="$node"
         log "    節點切換確認: ${node} ✓"
 
-        # 切換成功後立即驗證連通性（僅測一次，不進入重試循環）
+        # 切換成功後驗證連通性（最多重試 RETRY_MAX 次）
         # 用 temp file 避免 $(...) 子殼層導致的全域計數器遺失
-        check_connectivity > "$_conn_tmp"
-        cstatus=$(cat "$_conn_tmp")
+        local conn_retry=0
+        while [ $conn_retry -lt $RETRY_MAX ]; do
+            sleep $RETRY_INTERVAL
+            check_connectivity > "$_conn_tmp"
+            cstatus=$(cat "$_conn_tmp")
+            if ! is_down "$cstatus"; then
+                break
+            fi
+            conn_retry=$((conn_retry + 1))
+            [ $conn_retry -lt $RETRY_MAX ] && log "    連通性檢查失敗（${conn_retry}/${RETRY_MAX}），重試..."
+        done
+
         if ! is_down "$cstatus"; then
             log "    連通性驗證: ✓（${cstatus}）"
             log "    成功切換到: ${node} ✓"
@@ -447,7 +457,7 @@ switch_to_best_node() {
             rm -f "$_conn_tmp"
             return 0
         fi
-        log "    連通性驗證失敗（${cstatus}），切換到 ${node} 後不可用，嘗試下一個候選"
+        log "    連通性驗證失敗 — ${node} 在 ${RETRY_MAX} 次重試後仍不可用，嘗試下一個候選"
     done < <(sort -n "$tmpfile")
     rm -f "$_conn_tmp"
 
