@@ -12,7 +12,7 @@ Profile: trader | 用途: VPN 连線檢測 + 自動恢復
 2. **自動恢復鏈** — 7 步逐級升級：
    - 刷新 config（reload + 測速重連當前節點）
    - 切換到最佳節點（JP/SG > TW > US > other non-HK > HK，單一排名通道）
-   - 所有節點按統一政策排名，HK 因 bonus=200 自然排在最後
+   - 所有節點按 strict priority tier 排名，同 tier 內再按延遲排序；HK 永遠是最後 tier
    - 強制刷新訂閱（重新從機場拉節點列表）
    - 刷新後按統一政策重試節點
    - 輪詢所有備選 config，逐個嘗試節點切換
