@@ -20,6 +20,7 @@ jobs:
           bash -n install_vpn_monitor.sh
           bash -n tests/test_cli_missing_optional_args.sh
           bash -n tests/test_ci_workflow.sh
+          bash -n tests/test_node_ranking_policy.sh
 
       - name: Python syntax check
         run: |
@@ -29,3 +30,4 @@ jobs:
         run: |
           bash tests/test_cli_missing_optional_args.sh
           bash tests/test_ci_workflow.sh
+          bash tests/test_node_ranking_policy.sh
