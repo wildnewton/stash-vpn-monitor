@@ -347,84 +347,15 @@ def open_configs_page():
     time.sleep(2.5)
 
 
-def _walk_config_rows_iterative(root_elem, config_keywords,
-                                 _ax_children, _ax_role, _ax_label):
-    """Walk AX element tree iteratively (stack-based) and find config rows.
-
-    Fixes RecursionError on deep SwiftUI AX trees by using a manual stack
-    instead of Python call recursion.
-
-    Returns: [(label_text, ax_group_element, ax_static_text_element), ...]
-    """
-    rows = []
-    stack = [root_elem]
-    visited = set()
-
-    while stack:
-        elem = stack.pop()
-        eid = id(elem)
-        if eid in visited:
-            continue
-        visited.add(eid)
-
-        try:
-            children = _ax_children(elem)
-            role = _ax_role(elem)
-
-            if role == 'AXGroup':
-                sts = [(c, _ax_label(c)) for c in children if _ax_role(c) == 'AXStaticText']
-                if len(sts) == 1:
-                    st_elem, label = sts[0]
-                    kw = label.lower()
-                    if any(tag in kw for tag in config_keywords):
-                        rows.append((label, elem, st_elem))
-
-            for child in reversed(children):
-                stack.append(child)
-        except Exception:
-            continue
-
-    return rows
-
-
-def _walk_config_rows_recursive(root_elem, config_keywords,
-                                 _ax_children, _ax_role, _ax_label):
-    """[DEPRECATED — kept for reference. Use _walk_config_rows_iterative instead.]
-
-    Walk AX element tree recursively and find config rows.
-    Overflows on SwiftUI AX trees deeper than Python's recursion limit (~1000).
-
-    Returns: [(label_text, ax_group_element, ax_static_text_element), ...]
-    """
-    rows = []
-
-    def walk(elem):
-        children = _ax_children(elem)
-        if not children:
-            return
-
-        role = _ax_role(elem)
-        if role == 'AXGroup':
-            sts = [(c, _ax_label(c)) for c in children if _ax_role(c) == 'AXStaticText']
-            if len(sts) == 1:
-                st_elem, label = sts[0]
-                kw = label.lower()
-                if any(tag in kw for tag in config_keywords):
-                    rows.append((label, elem, st_elem))
-
-        for child in children:
-            walk(child)
-
-    walk(root_elem)
-    return rows
-
-
 def get_config_rows(root_elem):
     """在 Stash window 的 UI tree 中找出所有 config 列表行。
 
-    使用動態 config 名稱列表匹配，不再硬編碼關鍵字。
+    使用 iterative depth-first traversal，避免深層或循環 AX hierarchy
+    耗盡 Python recursion stack。
     返回: [(label_text, ax_group_element, ax_static_text_element), ...]
     """
+    rows = []
+
     # 動態取得所有 config 名稱作為匹配關鍵字
     all_configs = get_all_configs()
     config_keywords = [c.lower() for c in all_configs]
@@ -435,9 +366,35 @@ def get_config_rows(root_elem):
         'last updated'
     ])
 
-    return _walk_config_rows_iterative(
-        root_elem, config_keywords, ax_children, ax_role, ax_label,
-    )
+    stack = [root_elem]
+    visited = set()
+
+    while stack:
+        elem = stack.pop()
+        elem_id = id(elem)
+        if elem_id in visited:
+            continue
+        visited.add(elem_id)
+
+        children = ax_children(elem)
+        role = ax_role(elem)
+
+        if role == 'AXGroup':
+            static_texts = [
+                (child, ax_label(child))
+                for child in children
+                if ax_role(child) == 'AXStaticText'
+            ]
+            if len(static_texts) == 1:
+                static_text, label = static_texts[0]
+                label_lower = label.lower()
+                if any(keyword in label_lower for keyword in config_keywords):
+                    rows.append((label, elem, static_text))
+
+        for child in reversed(children):
+            stack.append(child)
+
+    return rows
 
 
 def switch_to_config(target_keyword):
