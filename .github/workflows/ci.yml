@@ -14,6 +14,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install Python test dependency
+        run: python3 -m pip install pytest
+
       - name: Shell syntax check
         run: |
           bash -n vpn_monitor.sh
@@ -28,6 +31,7 @@ jobs:
 
       - name: Regression tests
         run: |
+          python3 -m pytest -q
           bash tests/test_cli_missing_optional_args.sh
           bash tests/test_ci_workflow.sh
           bash tests/test_node_ranking_policy.sh

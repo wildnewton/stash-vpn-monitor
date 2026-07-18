@@ -350,7 +350,8 @@ def open_configs_page():
 def get_config_rows(root_elem):
     """在 Stash window 的 UI tree 中找出所有 config 列表行。
 
-    使用動態 config 名稱列表匹配，不再硬編碼關鍵字。
+    使用 iterative depth-first traversal，避免深層或循環 AX hierarchy
+    耗盡 Python recursion stack。
     返回: [(label_text, ax_group_element, ax_static_text_element), ...]
     """
     rows = []
@@ -365,24 +366,37 @@ def get_config_rows(root_elem):
         'last updated'
     ])
 
-    def walk(elem):
+    stack = [root_elem]
+    visited = {}
+
+    while stack:
+        elem = stack.pop()
+        elem_id = id(elem)
+        if elem_id in visited:
+            continue
+        visited[elem_id] = elem
+
         children = ax_children(elem)
         if not children:
-            return
+            continue
 
         role = ax_role(elem)
+
         if role == 'AXGroup':
-            sts = [(c, ax_label(c)) for c in children if ax_role(c) == 'AXStaticText']
-            if len(sts) == 1:
-                st_elem, label = sts[0]
-                kw = label.lower()
-                if any(tag in kw for tag in config_keywords):
-                    rows.append((label, elem, st_elem))
+            static_texts = [
+                (child, ax_label(child))
+                for child in children
+                if ax_role(child) == 'AXStaticText'
+            ]
+            if len(static_texts) == 1:
+                static_text, label = static_texts[0]
+                label_lower = label.lower()
+                if any(keyword in label_lower for keyword in config_keywords):
+                    rows.append((label, elem, static_text))
 
-        for child in children:
-            walk(child)
+        for child in reversed(children):
+            stack.append(child)
 
-    walk(root_elem)
     return rows
 
 
