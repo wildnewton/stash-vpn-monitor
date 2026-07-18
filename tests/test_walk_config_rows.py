@@ -58,20 +58,19 @@ def test_get_config_rows_handles_tree_deeper_than_recursion_limit():
     assert [label for label, _, _ in rows] == ['SsdAirport']
 
 
-def test_get_config_rows_preserves_depth_first_order():
-    glados = FakeAXElem(
-        role='AXGroup',
-        children=[FakeAXElem(role='AXStaticText', label='glados')],
-    )
-    airport = FakeAXElem(
-        role='AXGroup',
-        children=[FakeAXElem(role='AXStaticText', label='SsdAirport')],
-    )
+def test_get_config_rows_preserves_depth_first_order_and_row_elements():
+    glados_text = FakeAXElem(role='AXStaticText', label='glados')
+    glados = FakeAXElem(role='AXGroup', children=[glados_text])
+    airport_text = FakeAXElem(role='AXStaticText', label='SsdAirport')
+    airport = FakeAXElem(role='AXGroup', children=[airport_text])
     root = FakeAXElem(children=[glados, airport])
 
     rows = switcher.get_config_rows(root)
 
-    assert [label for label, _, _ in rows] == ['glados', 'SsdAirport']
+    assert rows == [
+        ('glados', glados, glados_text),
+        ('SsdAirport', airport, airport_text),
+    ]
 
 
 def test_get_config_rows_handles_cycle_without_duplicate_rows():
@@ -91,6 +90,15 @@ def test_get_config_rows_returns_empty_when_no_config_matches():
     root = _build_deep_chain(100, leaf_label='NotAConfig')
 
     assert switcher.get_config_rows(root) == []
+
+
+def test_get_config_rows_skips_role_lookup_for_childless_elements(monkeypatch):
+    def unexpected_ax_role(_elem):
+        raise AssertionError('ax_role should not be called for childless elements')
+
+    monkeypatch.setattr(switcher, 'ax_role', unexpected_ax_role)
+
+    assert switcher.get_config_rows(FakeAXElem(children=[])) == []
 
 
 def test_get_config_rows_propagates_ax_failures(monkeypatch):
