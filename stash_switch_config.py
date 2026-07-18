@@ -347,32 +347,23 @@ def open_configs_page():
     time.sleep(2.5)
 
 
-def get_config_rows(root_elem):
-    """在 Stash window 的 UI tree 中找出所有 config 列表行。
+def _walk_config_rows_recursive(root_elem, config_keywords,
+                                 _ax_children, _ax_role, _ax_label):
+    """[RECURSIVE — known to overflow on SwiftUI trees. Use iterative version.]
 
-    使用動態 config 名稱列表匹配，不再硬編碼關鍵字。
-    返回: [(label_text, ax_group_element, ax_static_text_element), ...]
+    Walk AX element tree recursively and find config rows.
+    Returns: [(label_text, ax_group_element, ax_static_text_element), ...]
     """
     rows = []
 
-    # 動態取得所有 config 名稱作為匹配關鍵字
-    all_configs = get_all_configs()
-    config_keywords = [c.lower() for c in all_configs]
-    # 通用回退關鍵字（當 iCloud 目錄不可用時）
-    config_keywords.extend([
-        'airport', 'updated', '@gmail', '@outlook', '@qq',
-        'hours ago', 'days ago', 'minutes ago', 'ago',
-        'last updated'
-    ])
-
     def walk(elem):
-        children = ax_children(elem)
+        children = _ax_children(elem)
         if not children:
             return
 
-        role = ax_role(elem)
+        role = _ax_role(elem)
         if role == 'AXGroup':
-            sts = [(c, ax_label(c)) for c in children if ax_role(c) == 'AXStaticText']
+            sts = [(c, _ax_label(c)) for c in children if _ax_role(c) == 'AXStaticText']
             if len(sts) == 1:
                 st_elem, label = sts[0]
                 kw = label.lower()
@@ -384,6 +375,27 @@ def get_config_rows(root_elem):
 
     walk(root_elem)
     return rows
+
+
+def get_config_rows(root_elem):
+    """在 Stash window 的 UI tree 中找出所有 config 列表行。
+
+    使用動態 config 名稱列表匹配，不再硬編碼關鍵字。
+    返回: [(label_text, ax_group_element, ax_static_text_element), ...]
+    """
+    # 動態取得所有 config 名稱作為匹配關鍵字
+    all_configs = get_all_configs()
+    config_keywords = [c.lower() for c in all_configs]
+    # 通用回退關鍵字（當 iCloud 目錄不可用時）
+    config_keywords.extend([
+        'airport', 'updated', '@gmail', '@outlook', '@qq',
+        'hours ago', 'days ago', 'minutes ago', 'ago',
+        'last updated'
+    ])
+
+    return _walk_config_rows_recursive(
+        root_elem, config_keywords, ax_children, ax_role, ax_label,
+    )
 
 
 def switch_to_config(target_keyword):
