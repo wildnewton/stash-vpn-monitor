@@ -377,6 +377,9 @@ def get_config_rows(root_elem):
         visited.add(elem_id)
 
         children = ax_children(elem)
+        if not children:
+            continue
+
         role = ax_role(elem)
 
         if role == 'AXGroup':
