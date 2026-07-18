@@ -367,14 +367,14 @@ def get_config_rows(root_elem):
     ])
 
     stack = [root_elem]
-    visited = set()
+    visited = {}
 
     while stack:
         elem = stack.pop()
         elem_id = id(elem)
         if elem_id in visited:
             continue
-        visited.add(elem_id)
+        visited[elem_id] = elem
 
         children = ax_children(elem)
         if not children:
