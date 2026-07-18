@@ -12,7 +12,10 @@ import pytest
 
 # Now safe to import
 sys.path.insert(0, '/Users/niu/Library/Mobile Documents/com~apple~CloudDocs/hermes-projects/stash-vpn-monitor')
-from stash_switch_config import _walk_config_rows_recursive
+from stash_switch_config import (
+    _walk_config_rows_recursive,
+    _walk_config_rows_iterative,
+)
 
 
 def _make_deep_mock_tree(depth=1500, leaf_label='SsdAirport'):
@@ -108,3 +111,56 @@ class TestRecursiveWalkDeepTree:
         assert len(rows) == 1
         label, group_elem, st_elem = rows[0]
         assert 'ssdairport' in label.lower()
+
+
+class TestIterativeWalkDeepTree:
+
+    def test_iterative_handles_deep_tree(self):
+        """Iterative walk should NOT raise RecursionError on deep trees."""
+        depth = 1500
+        root = _build_deep_chain(depth)
+        keywords = ['ssdairport']
+
+        # Should NOT raise any error
+        rows = _walk_config_rows_iterative(root, keywords, _ax_children, _ax_role, _ax_label)
+        assert len(rows) == 1
+        label, group_elem, st_elem = rows[0]
+        assert 'ssdairport' in label.lower()
+
+    def test_iterative_handles_very_deep_tree(self):
+        """Even extremely deep trees (5000+) should work."""
+        depth = 5000
+        root = _build_deep_chain(depth)
+        keywords = ['ssdairport']
+
+        rows = _walk_config_rows_iterative(root, keywords, _ax_children, _ax_role, _ax_label)
+        assert len(rows) == 1
+        assert 'ssdairport' in rows[0][0].lower()
+
+    def test_iterative_finds_multiple_matches(self):
+        """Should find multiple config rows across the tree."""
+        # Build two separate branches each with a config row
+        st1 = FakeAXElem(role='AXStaticText', label='glados')
+        branch1 = FakeAXElem(role='AXGroup', children=[st1])
+        for _ in range(5):
+            branch1 = FakeAXElem(role='AXGroup', children=[branch1])
+
+        st2 = FakeAXElem(role='AXStaticText', label='SsdAirport')
+        branch2 = FakeAXElem(role='AXGroup', children=[st2])
+        for _ in range(5):
+            branch2 = FakeAXElem(role='AXGroup', children=[branch2])
+
+        # Root wraps both branches
+        root = FakeAXElem(role='AXGroup', children=[branch1, branch2])
+
+        keywords = ['ssdairport', 'glados']
+        rows = _walk_config_rows_iterative(root, keywords, _ax_children, _ax_role, _ax_label)
+        assert len(rows) == 2
+
+    def test_iterative_no_matches(self):
+        """Should return empty list when no config rows found."""
+        root = _build_deep_chain(100, leaf_label='NotAKeyword')
+        keywords = ['ssdairport']
+
+        rows = _walk_config_rows_iterative(root, keywords, _ax_children, _ax_role, _ax_label)
+        assert len(rows) == 0

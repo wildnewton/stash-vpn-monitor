@@ -347,11 +347,53 @@ def open_configs_page():
     time.sleep(2.5)
 
 
+def _walk_config_rows_iterative(root_elem, config_keywords,
+                                 _ax_children, _ax_role, _ax_label):
+    """Walk AX element tree iteratively (stack-based) and find config rows.
+
+    Fixes RecursionError on deep SwiftUI AX trees by using a manual stack
+    instead of Python call recursion.
+
+    Returns: [(label_text, ax_group_element, ax_static_text_element), ...]
+    """
+    rows = []
+    stack = [root_elem]
+    visited = set()
+
+    while stack:
+        elem = stack.pop()
+        eid = id(elem)
+        if eid in visited:
+            continue
+        visited.add(eid)
+
+        try:
+            children = _ax_children(elem)
+            role = _ax_role(elem)
+
+            if role == 'AXGroup':
+                sts = [(c, _ax_label(c)) for c in children if _ax_role(c) == 'AXStaticText']
+                if len(sts) == 1:
+                    st_elem, label = sts[0]
+                    kw = label.lower()
+                    if any(tag in kw for tag in config_keywords):
+                        rows.append((label, elem, st_elem))
+
+            for child in reversed(children):
+                stack.append(child)
+        except Exception:
+            continue
+
+    return rows
+
+
 def _walk_config_rows_recursive(root_elem, config_keywords,
                                  _ax_children, _ax_role, _ax_label):
-    """[RECURSIVE — known to overflow on SwiftUI trees. Use iterative version.]
+    """[DEPRECATED — kept for reference. Use _walk_config_rows_iterative instead.]
 
     Walk AX element tree recursively and find config rows.
+    Overflows on SwiftUI AX trees deeper than Python's recursion limit (~1000).
+
     Returns: [(label_text, ax_group_element, ax_static_text_element), ...]
     """
     rows = []
@@ -393,7 +435,7 @@ def get_config_rows(root_elem):
         'last updated'
     ])
 
-    return _walk_config_rows_recursive(
+    return _walk_config_rows_iterative(
         root_elem, config_keywords, ax_children, ax_role, ax_label,
     )
 
