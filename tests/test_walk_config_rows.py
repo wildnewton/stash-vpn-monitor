@@ -1,5 +1,6 @@
 """Regression tests for Stash AX config-row traversal."""
 import sys
+import weakref
 from unittest.mock import MagicMock
 
 import pytest
@@ -84,6 +85,33 @@ def test_get_config_rows_handles_cycle_without_duplicate_rows():
     rows = switcher.get_config_rows(root)
 
     assert [label for label, _, _ in rows] == ['glados']
+
+
+def test_get_config_rows_keeps_visited_elements_alive(monkeypatch):
+    """Prevent Python id reuse while dynamically-created AX proxies are traversed."""
+    first_child_ref = None
+
+    class DynamicElem:
+        def __init__(self, level):
+            self.level = level
+
+    def dynamic_children(elem):
+        nonlocal first_child_ref
+        if elem.level == 0:
+            child = DynamicElem(1)
+            first_child_ref = weakref.ref(child)
+            return [child]
+        if elem.level == 1:
+            return [DynamicElem(2)]
+
+        assert first_child_ref is not None
+        assert first_child_ref() is not None
+        return []
+
+    monkeypatch.setattr(switcher, 'ax_children', dynamic_children)
+    monkeypatch.setattr(switcher, 'ax_role', lambda _elem: 'AXGroup')
+
+    assert switcher.get_config_rows(DynamicElem(0)) == []
 
 
 def test_get_config_rows_returns_empty_when_no_config_matches():
