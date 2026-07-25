@@ -1,10 +1,10 @@
-# AGENTS.md / README.md — Stash VPN Monitor
+# Stash VPN Monitor
 
-Profile: trader | 用途: VPN 连線檢測 + 自動恢復
+用途: Stash VPN 连線檢測 + 自動恢復 + 手動切換
 
 ## 概述
 
-自動監控 Stash VPN 連線，斷線時自動恢復：刷新 config → 切換節點 → 刷新訂閱 → 輪詢備選 config。
+自動監控 Stash VPN 連線，斷線時自動恢復：刷新 config → 切換節點 → 刷新訂閱 → 輪詢備選 config。也可手動切換節點或config等。
 
 ## 功能
 
@@ -34,7 +34,7 @@ cd vpn-monitor
 - 偵測已安裝 pyobjc 的 Python 環境
 - 生成配置檔案 `~/.config/vpn_monitor/config`
 - 複製腳本到 `~/.local/bin/`
-- 載入 LaunchAgent（每 300 秒 / 5 分鐘檢查一次）
+- 載入 LaunchAgent（默認每 300 秒 / 5 分鐘檢查一次）
 
 ## 配置
 
