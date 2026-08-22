@@ -20,3 +20,7 @@ AGENTS.md
 
 # Deprecated / dev-only scripts
 stash_inspect.applescript
+
+# Local working files
+docs/
+output/
