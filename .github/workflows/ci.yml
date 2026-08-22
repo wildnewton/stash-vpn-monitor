@@ -26,6 +26,7 @@ jobs:
           bash -n tests/test_node_ranking_policy.sh
           bash -n tests/test_log_report.sh
           bash -n tests/test_report_module_layout.sh
+          bash -n tests/test_log_report_edge_cases.sh
 
       - name: Python syntax check
         run: |
@@ -40,3 +41,4 @@ jobs:
           bash tests/test_node_ranking_policy.sh
           bash tests/test_log_report.sh
           bash tests/test_report_module_layout.sh
+          bash tests/test_log_report_edge_cases.sh
