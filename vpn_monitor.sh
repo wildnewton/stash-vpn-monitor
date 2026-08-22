@@ -1242,12 +1242,19 @@ cmd_report() {
         echo "Error: Python is required for --report ($PYTHON_BIN)" >&2
         return 1
     fi
-    if [ ! -f "$REPORT_SCRIPT" ]; then
-        echo "Error: report script not found: $REPORT_SCRIPT" >&2
-        return 1
+    local report_script="$REPORT_SCRIPT"
+    if [ ! -f "$report_script" ]; then
+        local repo
+        repo=$(detect_repo 2>/dev/null)
+        if [ -n "$repo" ] && [ -f "$repo/vpn_report.py" ]; then
+            report_script="$repo/vpn_report.py"
+        else
+            echo "Error: report script not found: $REPORT_SCRIPT" >&2
+            return 1
+        fi
     fi
 
-    "$PYTHON_BIN" "$REPORT_SCRIPT" "$LOG_FILE" "$period"
+    "$PYTHON_BIN" "$report_script" "$LOG_FILE" "$period"
 }
 
 cmd_status() {
