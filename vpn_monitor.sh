@@ -1354,26 +1354,40 @@ cmd_live_test() {
     local selection_status routing_status runtime_status whole_status provider_state_status shared_status
     if [ -n "$pre_restart_selection" ] && [ "$post_restart_selection" = "$pre_restart_selection" ]; then
         selection_status="rejected"
-    elif [ -n "$pre_restart_selection" ] && [ -n "$post_restart_selection" ]; then
-        selection_status="confirmed"
     else
-        selection_status="unresolved"
+        # Hypothesis classification with valid-evidence gates
+        if [ "$restart_status" != "api-ready" ] || [ -z "$post_restart_selection" ] || [ "$post_restart_selection" != "$requested_node" ]; then
+            selection_status="confirmed"
+        else
+            selection_status="rejected"
+        fi
     fi
-    if [ "$probe_group" != "unknown" ] && [ "$probe_group" != "$routing_group" ]; then
+    # probe_routing_mismatch requires resolved probe_group (not unknown/UNRESOLVED)
+    if [ "$probe_group" != "unknown" ] && [ "$probe_group" != "UNRESOLVED" ] && [ "$probe_group" != "$routing_group" ]; then
         routing_status="confirmed"
     elif [ "$probe_group" = "$routing_group" ]; then
         routing_status="rejected"
     else
         routing_status="unresolved"
     fi
-    if [ "$reload_before_runtime" != "$reload_after_runtime" ]; then
-        runtime_status="confirmed"
+    # runtime_config_reload requires successful PUT (2xx status)
+    if [ "$reload_status" = "200" ] || [ "$reload_status" = "202" ] || [ "$reload_status" = "204" ]; then
+        if [ "$reload_before_runtime" != "$reload_after_runtime" ]; then
+            runtime_status="confirmed"
+        else
+            runtime_status="rejected"
+        fi
     else
-        runtime_status="rejected"
+        runtime_status="unresolved"
     fi
     case "$model" in
         subscribed-whole-config|combination)
-            if [ "$force_before_config" != "$force_after_config" ]; then whole_status="confirmed"; else whole_status="unresolved"; fi
+            # whole_config_subscription requires successful force=true PUT (2xx status)
+            if [ "$force_status" = "200" ] || [ "$force_status" = "202" ] || [ "$force_status" = "204" ]; then
+                if [ "$force_before_config" != "$force_after_config" ]; then whole_status="confirmed"; else whole_status="unresolved"; fi
+            else
+                whole_status="unresolved"
+            fi
             ;;
         *) whole_status="unresolved" ;;
     esac
@@ -1382,7 +1396,8 @@ cmd_live_test() {
     else
         provider_state_status="unresolved"
     fi
-    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded && [ "$routing_status" = "rejected" ] && [ "$selection_status" = "rejected" ]; then
+    # shared_data_path requires valid correlation (not unresolved)
+    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded && $reproduction_correlation_valid && [ "$routing_status" = "rejected" ] && [ "$selection_status" = "rejected" ]; then
         shared_status="confirmed"
     else
         shared_status="unresolved"
