@@ -127,9 +127,32 @@ assert_production_contains "0/27 candidates reachable"
 assert_production_contains "subscription refresh -> 56 runtime nodes"
 assert_production_contains "Significant incidents / Timeline"
 
-# The routine retry-only incident is aggregated rather than dumped as a separate timeline item.
-assert_production_not_contains "07:31:40  connectivity issue detected"
+# The routine retry-only incident is aggregated rather than dumped individually.
+assert_production_not_contains "Incident 1: 2026-08-22 07:31:40"
 # There must not be a second standalone Timeline section duplicating the significant incidents.
 assert_production_not_contains $'\nTimeline\n'
+
+# Alternate-config escalation must be classified from the successful config-switch
+# action rather than guessed from the node that eventually verifies connectivity.
+cat > "$log_file" <<'EOF'
+[2026-08-22 08:10:00] 狀態: 全部檢測失敗 — 將重試 5 次再確認...
+[2026-08-22 08:11:00] === 開始恢復流程 ===
+[2026-08-22 08:12:00]   ✓ Config 切換成功: backup.yaml
+[2026-08-22 08:13:00]     節點切換成功: JP-Backup-01 — 同步 GUI（重啟 Stash）
+[2026-08-22 08:14:00]     成功切換到: JP-Backup-01 ✓
+[2026-08-22 08:14:00] 恢復成功（backup.yaml + 節點切換）✓
+EOF
+
+alternate_output="$(VPN_REPORT_NOW="$TEST_NOW" python3 "$REPORT" "$log_file" 1h)"
+if [[ "$alternate_output" != *"Alternate config: 1"* ]]; then
+    echo "Expected alternate-config recovery depth to be classified" >&2
+    printf '%s\n' "$alternate_output" >&2
+    exit 1
+fi
+if [[ "$alternate_output" != *"Config switches: 1"* ]]; then
+    echo "Expected successful alternate-config switch to be counted" >&2
+    printf '%s\n' "$alternate_output" >&2
+    exit 1
+fi
 
 echo "Log report edge-case tests passed"
