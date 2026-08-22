@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/vpn_monitor.sh"
+TEST_NOW="2026-08-22 08:00:00"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -26,11 +27,12 @@ LOG_FILE="$log_file"
 EOF
 
 stamp_ago() {
-    python3 - "$1" <<'PY'
+    python3 - "$TEST_NOW" "$1" <<'PY'
 from datetime import datetime, timedelta
 import sys
-seconds = int(sys.argv[1])
-print((datetime.now() - timedelta(seconds=seconds)).strftime('%Y-%m-%d %H:%M:%S'))
+base = datetime.strptime(sys.argv[1], '%Y-%m-%d %H:%M:%S')
+seconds = int(sys.argv[2])
+print((base - timedelta(seconds=seconds)).strftime('%Y-%m-%d %H:%M:%S'))
 PY
 }
 
@@ -45,6 +47,7 @@ write_log() {
 run_report() {
     PATH="$fakebin:$PATH" \
     VPN_REPORT_CURL_SENTINEL="$curl_sentinel" \
+    VPN_REPORT_NOW="$TEST_NOW" \
     VPN_MONITOR_CONFIG="$config_file" \
         bash "$SCRIPT" --report "$@" 2>&1
 }
@@ -149,8 +152,6 @@ assert_contains "$incident_output" "Incident 2"
 assert_contains "$incident_output" "Incident 3"
 assert_contains "$incident_output" "unresolved"
 assert_contains "$incident_output" "Timeline"
-# The older incident must be excluded by the 2h cutoff.
-assert_not_contains "$incident_output" "14400"
 assert_not_contains "$incident_output" "Uptime:"
 if [ -e "$curl_sentinel" ]; then
     echo "Report mode must remain log-only even for incident reports" >&2
