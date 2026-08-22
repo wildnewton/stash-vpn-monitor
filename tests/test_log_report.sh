@@ -186,7 +186,8 @@ assert_contains "$observed_recovery_output" "Unresolved: 0"
 assert_contains "$observed_recovery_output" "Average recovery: 10m 0s"
 
 # An incident that starts before the requested window but remains active into
-# the window must not disappear from the report.
+# the window must not disappear from the report. Its pre-window actions are
+# context only and must not be presented as in-window report activity.
 write_log \
     4200 "狀態: 全部檢測失敗 — 將重試 5 次再確認..." \
     4140 "=== 開始恢復流程 ===" \
@@ -200,6 +201,9 @@ assert_contains "$overlap_output" "Recovered: 1"
 assert_contains "$overlap_output" "Unresolved: 0"
 assert_contains "$overlap_output" "Average recovery: 40m 0s"
 assert_contains "$overlap_output" "Incident 1"
+assert_contains "$overlap_output" "started before period"
+assert_contains "$overlap_output" "node switch API success: JP-03"
+assert_not_contains "$overlap_output" "recovery flow started"
 
 # If the log itself starts after the requested cutoff, disclose partial coverage.
 write_log \
