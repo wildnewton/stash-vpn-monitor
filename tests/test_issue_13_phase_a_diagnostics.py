@@ -274,6 +274,7 @@ def _diagnostic_run(
         "FAKE_STASH_STATE": str(state_path),
         "FAKE_STASH_EVENTS": str(events_path),
         "FAKE_PROBE_CODES": probe_codes,
+        "HTTP_URL": "http://www.gstatic.com/generate_204",
     })
     result = subprocess.run(
         ["bash", "-c", harness],
@@ -297,9 +298,20 @@ def _normalized(text: str) -> str:
 def _assert_fields_share_a_line(output: str, *fields: str) -> None:
     normalized_fields = [_normalized(field) for field in fields]
     lines = [_normalized(line) for line in output.splitlines()]
-    assert any(all(field in line for field in normalized_fields) for line in lines), (
-        f"expected one diagnostic record containing {fields!r}\noutput:\n{output}"
-    )
+    for line in lines:
+        match = True
+        for field in normalized_fields:
+            # Match field as exact key or value, not substring of another key
+            # After normalization, spaces/underscores become '-', so check for
+            # word boundaries: field must be preceded by start/space/=/- and
+            # followed by space/=/-/end
+            pattern = rf'(?:^|[\s=\-]){re.escape(field)}(?:[\s=\-]|$)'
+            if not re.search(pattern, line):
+                match = False
+                break
+        if match:
+            return
+    assert False, f"expected one diagnostic record containing {fields!r}\noutput:\n{output}"
 
 
 def test_live_diagnostic_distinguishes_restart_and_every_probe_readback(tmp_path, monitor_library):

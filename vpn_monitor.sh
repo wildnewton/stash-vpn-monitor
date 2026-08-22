@@ -1263,10 +1263,15 @@ cmd_live_test() {
         attempt=$((attempt + 1))
     done
 
-    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded; then
-        echo "DIAG reproduction=confirmed delay_reachable=true http_failed=true attempt_bound=${max_attempts}"
+    local route_correlation_valid=false
+    if [ "$probe_group" = "$routing_group" ] && [ -n "$probe_time_selection" ] && [ "$probe_time_selection" = "$requested_node" ]; then
+        route_correlation_valid=true
+    fi
+
+    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded && $route_correlation_valid; then
+        echo "DIAG reproduction=confirmed delay_reachable=true http_failed=true route_correlation=valid attempt_bound=${max_attempts}"
     else
-        echo "DIAG reproduction=unresolved delay_reachable=$([ "$requested_delay" -gt 0 ] 2>/dev/null && echo true || echo false) attempt_bound=${max_attempts}"
+        echo "DIAG reproduction=unresolved delay_reachable=$([ "$requested_delay" -gt 0 ] 2>/dev/null && echo true || echo false) route_correlation=$route_correlation_valid attempt_bound=${max_attempts}"
     fi
 
     local phase_b_probe_status
