@@ -728,7 +728,7 @@ recover() {
 
     log "當前 config 所有節點皆失敗，嘗試強制刷新訂閱..."
 
-    # Step 4: 強制刷新訂閱（從機場重新拉節點，內部已含 sleep 15）
+    # Step 4: 強制刷新訂閱（從機場重新拉節點列表，內部已含 sleep 15）
     refresh_subscription
 
     # 刷新後先檢查連通性（訂閱刷新可能直接解決問題）
@@ -1499,6 +1499,7 @@ def report(log_file, period_text):
     print("Incidents")
     for index, incident in enumerate(incidents, start=1):
         boundary_note = "; started before period" if incident.start < cutoff else ""
+        visible_actions = [(action_ts, action) for action_ts, action in incident.actions if action_ts >= cutoff]
         if incident.recovered:
             print(
                 "Incident %d: %s → %s (%s, recovered%s)" % (
@@ -1511,8 +1512,8 @@ def report(log_file, period_text):
             )
         else:
             print("Incident %d: %s → unresolved%s" % (index, short_time(incident.start), boundary_note))
-        if incident.actions:
-            print("  " + " → ".join(action for _, action in incident.actions))
+        if visible_actions:
+            print("  " + " → ".join(action for _, action in visible_actions))
 
     if problematic_nodes:
         print()
@@ -1523,13 +1524,17 @@ def report(log_file, period_text):
     print()
     print("Timeline")
     for incident in incidents:
-        print("  %s  connectivity issue detected" % incident.start.strftime("%m-%d %H:%M:%S"))
+        if incident.start >= cutoff:
+            print("  %s  connectivity issue detected" % incident.start.strftime("%m-%d %H:%M:%S"))
+        else:
+            print("  %s  incident already in progress at period start" % cutoff.strftime("%m-%d %H:%M:%S"))
         for action_ts, action in incident.actions:
-            print("  %s  %s" % (action_ts.strftime("%m-%d %H:%M:%S"), action))
+            if action_ts >= cutoff:
+                print("  %s  %s" % (action_ts.strftime("%m-%d %H:%M:%S"), action))
         if incident.end is not None:
             print("  %s  connectivity recovered" % incident.end.strftime("%m-%d %H:%M:%S"))
         else:
-            print("  %s  unresolved at report time" % now.strftime("%m-%d %H:%M:%S"))
+            print("  %s  no recovery observed by report time" % now.strftime("%m-%d %H:%M:%S"))
 
 
 report(sys.argv[1], sys.argv[2])
