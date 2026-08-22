@@ -1215,9 +1215,18 @@ cmd_live_test() {
     close_connections
     echo "DIAG requested_group=${routing_group} requested_node=${requested_node} delay_ms=${requested_delay} http_status=${switch_status} result=${switch_body}"
 
+    local reproduction_correlation_valid=true
+    case "$switch_status" in
+        2??) ;;
+        *) reproduction_correlation_valid=false ;;
+    esac
+
     local pre_restart_selection restart_status post_restart_selection gui_selection
     pre_restart_selection=$(get_current_node)
     echo "DIAG pre-restart selection=${pre_restart_selection:-empty} requested_node=${requested_node}"
+    if [ -z "$pre_restart_selection" ] || [ "$pre_restart_selection" != "$requested_node" ]; then
+        reproduction_correlation_valid=false
+    fi
 
     if restart_stash; then
         restart_status="api-ready"
@@ -1226,6 +1235,9 @@ cmd_live_test() {
     fi
     post_restart_selection=$(get_current_node)
     echo "DIAG post-restart ${restart_status} selection=${post_restart_selection:-empty} requested_node=${requested_node}"
+    if [ "$restart_status" != "api-ready" ] || [ -z "$post_restart_selection" ] || [ "$post_restart_selection" != "$requested_node" ]; then
+        reproduction_correlation_valid=false
+    fi
 
     gui_selection=$(get_gui_selected_node 2>/dev/null || echo "unavailable")
     echo "DIAG gui-readback selection=${gui_selection:-unavailable}"
@@ -1243,6 +1255,9 @@ cmd_live_test() {
     probe_payload="${probe_payload:-*}"
     probe_group="${probe_group:-unknown}"
     echo "DIAG probe_rule=${probe_rule} probe_payload=${probe_payload} probe_group=${probe_group} url=${HTTP_URL}"
+    if [ "$probe_group" != "$routing_group" ]; then
+        reproduction_correlation_valid=false
+    fi
 
     local attempt probe_time_selection http_code probe_failed=false probe_succeeded=false
     attempt=1
@@ -1251,6 +1266,10 @@ cmd_live_test() {
         probe_group_selection=$(diagnostic_group_selected_node "$probe_group")
         echo "DIAG probe-time attempt=${attempt} selection=${probe_time_selection:-empty} probe_group=${probe_group} probe_group_selection=${probe_group_selection:-empty}"
         echo "DIAG probe_group=${probe_group} switched_group=${routing_group} probe_time_selection=${probe_time_selection:-empty} probe_group_selection=${probe_group_selection:-empty}"
+        if [ -z "$probe_time_selection" ] || [ "$probe_time_selection" != "$requested_node" ] || \
+           [ -z "$probe_group_selection" ] || [ "$probe_group_selection" != "$requested_node" ]; then
+            reproduction_correlation_valid=false
+        fi
 
         http_code=$(curl -s -m "$HTTP_TIMEOUT" -x "http://127.0.0.1:$PROXY_PORT" \
             -o /dev/null -w "%{http_code}" "$HTTP_URL" 2>/dev/null || echo "000")
@@ -1263,15 +1282,10 @@ cmd_live_test() {
         attempt=$((attempt + 1))
     done
 
-    local route_correlation_valid=false
-    if [ "$probe_group" = "$routing_group" ] && [ -n "$probe_time_selection" ] && [ "$probe_time_selection" = "$requested_node" ]; then
-        route_correlation_valid=true
-    fi
-
-    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded && $route_correlation_valid; then
+    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded && $reproduction_correlation_valid; then
         echo "DIAG reproduction=confirmed delay_reachable=true http_failed=true route_correlation=valid attempt_bound=${max_attempts}"
     else
-        echo "DIAG reproduction=unresolved delay_reachable=$([ "$requested_delay" -gt 0 ] 2>/dev/null && echo true || echo false) route_correlation=$route_correlation_valid attempt_bound=${max_attempts}"
+        echo "DIAG reproduction=unresolved delay_reachable=$([ "$requested_delay" -gt 0 ] 2>/dev/null && echo true || echo false) route_correlation=$reproduction_correlation_valid attempt_bound=${max_attempts}"
     fi
 
     local phase_b_probe_status
