@@ -62,8 +62,8 @@ fi
 # Production-log patterns: routine retry self-recovery should be aggregated,
 # while actual recovery-flow escalation remains individually useful.
 cat > "$log_file" <<'EOF'
-[2026-08-22 07:01:40] 狀態: Ping 正常，HTTP 代理失敗 — 將重試 5 次再確認...
-[2026-08-22 07:02:00]   重試 #1: 已恢復 ✓
+[2026-08-22 07:31:40] 狀態: Ping 正常，HTTP 代理失敗 — 將重試 5 次再確認...
+[2026-08-22 07:32:00]   重試 #1: 已恢復 ✓
 [2026-08-22 07:40:00] 狀態: Ping 正常，HTTP 代理失敗 — 將重試 5 次再確認...
 [2026-08-22 07:41:00]   5 次重試後仍失敗，啟動恢復流程...
 [2026-08-22 07:41:10] === 開始恢復流程 ===
@@ -128,7 +128,7 @@ assert_production_contains "subscription refresh -> 56 runtime nodes"
 assert_production_contains "Significant incidents / Timeline"
 
 # The routine retry-only incident is aggregated rather than dumped as a separate timeline item.
-assert_production_not_contains "07:01:40  connectivity issue detected"
+assert_production_not_contains "07:31:40  connectivity issue detected"
 # There must not be a second standalone Timeline section duplicating the significant incidents.
 assert_production_not_contains $'\nTimeline\n'
 
