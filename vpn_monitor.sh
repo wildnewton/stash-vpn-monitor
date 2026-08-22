@@ -1368,16 +1368,16 @@ cmd_live_test() {
             selection_status="rejected"
         fi
     fi
-    # probe_routing_mismatch requires resolved probe_group (not unknown/UNRESOLVED)
-    if [ "$probe_group" != "unknown" ] && [ "$probe_group" != "UNRESOLVED" ] && [ "$probe_group" != "$routing_group" ]; then
-        routing_status="confirmed"
-    elif [ "$probe_group" = "$routing_group" ]; then
-        routing_status="rejected"
-    else
+    # probe_routing_mismatch requires resolved probe_rule AND probe_group (not unknown/UNRESOLVED)
+    if [ "$probe_rule" = "UNRESOLVED" ] || [ "$probe_group" = "unknown" ] || [ "$probe_group" = "UNRESOLVED" ]; then
         routing_status="unresolved"
+    elif [ "$probe_group" != "$routing_group" ]; then
+        routing_status="confirmed"
+    else
+        routing_status="rejected"
     fi
-    # runtime_config_reload requires successful PUT (2xx status)
-    if [ "$reload_status" = "200" ] || [ "$reload_status" = "202" ] || [ "$reload_status" = "204" ]; then
+    # runtime_config_reload requires successful transport (ok) AND HTTP 2xx status
+    if [ "$reload_transport" = "ok" ] && { [ "$reload_status" = "200" ] || [ "$reload_status" = "202" ] || [ "$reload_status" = "204" ]; }; then
         if [ "$reload_before_runtime" != "$reload_after_runtime" ]; then
             runtime_status="confirmed"
         else
@@ -1388,8 +1388,8 @@ cmd_live_test() {
     fi
     case "$model" in
         subscribed-whole-config|combination)
-            # whole_config_subscription requires successful force=true PUT (2xx status)
-            if [ "$force_status" = "200" ] || [ "$force_status" = "202" ] || [ "$force_status" = "204" ]; then
+            # whole_config_subscription requires successful transport (ok) AND HTTP 2xx status
+            if [ "$force_transport" = "ok" ] && { [ "$force_status" = "200" ] || [ "$force_status" = "202" ] || [ "$force_status" = "204" ]; }; then
                 if [ "$force_before_config" != "$force_after_config" ]; then whole_status="confirmed"; else whole_status="unresolved"; fi
             else
                 whole_status="unresolved"

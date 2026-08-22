@@ -61,6 +61,7 @@ if parts.query:
 
 status = 200
 body = ""
+transport_rc = 0
 
 if parts.hostname == "www.gstatic.com":
     codes = [item for item in os.environ.get("FAKE_PROBE_CODES", "204").split(",") if item]
@@ -86,7 +87,11 @@ else:
     elif method == "GET" and endpoint == "/rules":
         body = json.dumps({
             "rules": [
-                {"type": "DOMAIN", "payload": "www.gstatic.com", "proxy": os.environ.get("FAKE_PROBE_GROUP", "Probe Policy")},
+                {
+                    "type": os.environ.get("FAKE_PROBE_RULE_TYPE", "DOMAIN"),
+                    "payload": os.environ.get("FAKE_PROBE_RULE_PAYLOAD", "www.gstatic.com"),
+                    "proxy": os.environ.get("FAKE_PROBE_GROUP", "Probe Policy"),
+                },
                 {"type": "MATCH", "proxy": "Default Proxy"},
             ]
         })
@@ -113,11 +118,18 @@ else:
         status = int(os.environ.get("FAKE_SWITCH_HTTP_STATUS", "204"))
         body = json.dumps({"result": "selected"})
     elif method == "PUT" and endpoint == "/configs":
-        status = 202
+        status = int(os.environ.get("FAKE_RELOAD_HTTP_STATUS", "202"))
+        transport_rc = int(os.environ.get("FAKE_RELOAD_TRANSPORT_RC", "0"))
+        if os.environ.get("FAKE_RELOAD_CHANGES_RUNTIME", "false") == "true":
+            state["runtime_generation"] += 1
         body = json.dumps({"result": "accepted", "forced": False})
     elif method == "PUT" and endpoint == "/configs?force=true":
         state["runtime_generation"] += 1
-        status = 202
+        status = int(os.environ.get("FAKE_FORCE_HTTP_STATUS", "202"))
+        transport_rc = int(os.environ.get("FAKE_FORCE_TRANSPORT_RC", "0"))
+        if os.environ.get("FAKE_FORCE_CHANGES_CONFIG", "false") == "true":
+            config_path = Path(os.environ["FAKE_STASH_CONFIG"])
+            config_path.write_text(config_path.read_text() + "# refreshed\n")
         body = json.dumps({"result": "accepted", "forced": True})
     elif method == "PUT" and endpoint == "/providers/proxies/airport":
         state["provider_generation"] += 1
@@ -137,6 +149,7 @@ elif not output_path:
     sys.stdout.write(body)
 if write_format:
     sys.stdout.write(write_format.replace("%{http_code}", str(status)))
+sys.exit(transport_rc)
 '''
 
 
@@ -213,6 +226,14 @@ def _diagnostic_run(
     switch_applies: bool = True,
     node_after_gui: str = "",
     nodes_after_probe: tuple[str, ...] = (),
+    reload_http_status: int = 202,
+    reload_transport_rc: int = 0,
+    reload_changes_runtime: bool = False,
+    force_http_status: int = 202,
+    force_transport_rc: int = 0,
+    force_changes_config: bool = False,
+    probe_rule_type: str = "DOMAIN",
+    probe_rule_payload: str = "www.gstatic.com",
 ) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake_bin = tmp_path / "fake-bin"
@@ -297,6 +318,15 @@ def _diagnostic_run(
         "FAKE_SWITCH_HTTP_STATUS": str(switch_http_status),
         "FAKE_SWITCH_APPLIES": "true" if switch_applies else "false",
         "FAKE_NODES_AFTER_PROBE": ",".join(nodes_after_probe),
+        "FAKE_RELOAD_HTTP_STATUS": str(reload_http_status),
+        "FAKE_RELOAD_TRANSPORT_RC": str(reload_transport_rc),
+        "FAKE_RELOAD_CHANGES_RUNTIME": "true" if reload_changes_runtime else "false",
+        "FAKE_FORCE_HTTP_STATUS": str(force_http_status),
+        "FAKE_FORCE_TRANSPORT_RC": str(force_transport_rc),
+        "FAKE_FORCE_CHANGES_CONFIG": "true" if force_changes_config else "false",
+        "FAKE_STASH_CONFIG": str(stash_dir / "config.yaml"),
+        "FAKE_PROBE_RULE_TYPE": probe_rule_type,
+        "FAKE_PROBE_RULE_PAYLOAD": probe_rule_payload,
         "HTTP_URL": "http://www.gstatic.com/generate_204",
     })
     result = subprocess.run(
@@ -356,6 +386,13 @@ def _current_probe_route_records(output: str) -> list[dict[str, str]]:
 def _reproduction_status(output: str) -> str:
     matches = re.findall(r"^DIAG reproduction=(confirmed|unresolved)\b", output, re.MULTILINE)
     assert len(matches) == 1, f"expected exactly one structured reproduction record\n{output}"
+    return matches[0]
+
+
+def _hypothesis_status(output: str, hypothesis: str) -> str:
+    pattern = rf"^DIAG hypothesis={re.escape(hypothesis)} status=(confirmed|rejected|unresolved)$"
+    matches = re.findall(pattern, output, re.MULTILINE)
+    assert len(matches) == 1, f"expected one {hypothesis} matrix record\n{output}"
     return matches[0]
 
 
@@ -486,6 +523,7 @@ def test_any_failed_reproduction_correlation_gate_is_unresolved(
     )
     assert result.returncode == 0, f"{case}: {result.stderr}"
     assert _reproduction_status(result.stdout) == "unresolved", f"{case}\n{result.stdout}"
+    assert _hypothesis_status(result.stdout, "shared_data_path") == "unresolved"
 
     if case == "restart-node-loss":
         _assert_fields_share_a_line(result.stdout, "post-restart", "selection", "POST-RESTART-NODE")
@@ -496,6 +534,141 @@ def test_any_failed_reproduction_correlation_gate_is_unresolved(
     elif case == "earlier-probe-node-mismatch":
         diagnostic_probes = [event for event in events if event["kind"] == "http_probe"][:2]
         assert [event["selected"] for event in diagnostic_probes] == ["OTHER-NODE", "JP-DIAGNOSTIC"]
+
+
+def test_unresolved_probe_route_cannot_confirm_routing_mismatch_or_shared_data_path(
+    tmp_path, monitor_library
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_codes="000,000,000",
+        probe_group="Unprovable Group",
+        probe_rule_type="DOMAIN-KEYWORD",
+        probe_rule_payload="gstatic",
+        restart_node="JP-DIAGNOSTIC",
+    )
+    assert result.returncode == 0, result.stderr
+    route_records = _current_probe_route_records(result.stdout)
+    assert route_records[0]["probe_rule"] == "UNRESOLVED"
+    assert "reproduction=unresolved" in result.stdout
+    assert "route_correlation=false" in result.stdout
+    assert _hypothesis_status(result.stdout, "probe_routing_mismatch") == "unresolved"
+    assert _hypothesis_status(result.stdout, "shared_data_path") == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("case", "run_kwargs", "hypothesis"),
+    [
+        (
+            "runtime-transport-failed-despite-2xx-and-changed-fingerprint",
+            {
+                "reload_http_status": 202,
+                "reload_transport_rc": 7,
+                "reload_changes_runtime": True,
+            },
+            "runtime_config_reload",
+        ),
+        (
+            "runtime-http-405-despite-changed-fingerprint",
+            {
+                "reload_http_status": 405,
+                "reload_transport_rc": 0,
+                "reload_changes_runtime": True,
+            },
+            "runtime_config_reload",
+        ),
+        (
+            "whole-config-transport-failed-despite-2xx-and-changed-fingerprint",
+            {
+                "config_model": "subscribed_whole_config",
+                "force_http_status": 202,
+                "force_transport_rc": 7,
+                "force_changes_config": True,
+            },
+            "whole_config_subscription",
+        ),
+        (
+            "whole-config-http-500-despite-changed-fingerprint",
+            {
+                "config_model": "subscribed_whole_config",
+                "force_http_status": 500,
+                "force_transport_rc": 0,
+                "force_changes_config": True,
+            },
+            "whole_config_subscription",
+        ),
+    ],
+)
+def test_reload_hypotheses_require_transport_success_and_http_2xx_before_fingerprints(
+    tmp_path, monitor_library, case, run_kwargs, hypothesis
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_codes="000,000,000",
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+        **run_kwargs,
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    assert _hypothesis_status(result.stdout, hypothesis) == "unresolved", f"{case}\n{result.stdout}"
+
+
+def test_successful_transport_and_2xx_allow_changed_fingerprints_to_confirm(
+    tmp_path, monitor_library
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        config_model="subscribed_whole_config",
+        probe_codes="000,000,000",
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+        reload_http_status=202,
+        reload_transport_rc=0,
+        reload_changes_runtime=True,
+        force_http_status=202,
+        force_transport_rc=0,
+        force_changes_config=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _hypothesis_status(result.stdout, "runtime_config_reload") == "confirmed"
+    assert _hypothesis_status(result.stdout, "whole_config_subscription") == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "run_kwargs",
+    [
+        {"switch_http_status": 500},
+        {"switch_applies": False},
+        {
+            "node_after_gui": "OTHER-NODE",
+            "nodes_after_probe": ("JP-DIAGNOSTIC", "JP-DIAGNOSTIC"),
+        },
+    ],
+)
+def test_correlation_invalid_reproduction_has_no_dependent_confirmed_hypothesis(
+    tmp_path, monitor_library, run_kwargs
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_codes="000,000,000",
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+        **run_kwargs,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "reproduction=unresolved" in result.stdout
+    assert "route_correlation=false" in result.stdout
+    for hypothesis in (
+        "probe_routing_mismatch",
+        "runtime_config_reload",
+        "whole_config_subscription",
+        "shared_data_path",
+    ):
+        assert _hypothesis_status(result.stdout, hypothesis) != "confirmed"
 
 
 def test_live_diagnostic_compares_exact_config_reload_endpoints_and_evidence(tmp_path, monitor_library):

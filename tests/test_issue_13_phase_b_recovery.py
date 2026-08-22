@@ -350,6 +350,154 @@ def test_mid_window_correlation_loss_is_terminal_without_candidate_failure_or_no
     assert notifications == ""
 
 
+def test_restart_group_change_is_terminal_unresolved_against_the_exact_switched_group(
+    tmp_path, monitor_library
+):
+    result = run_library(
+        tmp_path,
+        monitor_library,
+        r'''
+        RETRY_MAX=2
+        RETRY_INTERVAL=0
+        events="$TEST_TMPDIR/group-change-events"; : > "$events"
+        group_file="$TEST_TMPDIR/runtime-group"; echo "Old Group" > "$group_file"
+        old_node="$TEST_TMPDIR/old-node"; echo "ORIGINAL" > "$old_node"
+        new_node="$TEST_TMPDIR/new-node"; echo "CANDIDATE-C" > "$new_node"
+        tmpfile="$TEST_TMPDIR/return-trap-fallback"; : > "$tmpfile"
+
+        eval "$(declare -f check_connectivity | sed '1s/check_connectivity/original_check_connectivity/')"
+
+        log() { echo "LOG:$1" >> "$events"; }
+        notify() { echo "NOTIFY:$1:$2" >> "$events"; }
+        sleep() { :; }
+        close_connections() { :; }
+        refresh_config() { echo RUNTIME-RELOAD >> "$events"; return 1; }
+        refresh_subscription() { echo REMOTE-UPDATE >> "$events"; return 2; }
+        try_alternative_configs() { echo ALTERNATE-CONFIG >> "$events"; return 1; }
+        get_routing_group() { cat "$group_file"; }
+        urlencode() { echo "$1"; }
+        get_selectable_nodes() { printf '%s\n' "CANDIDATE-C" "CANDIDATE-D"; }
+        test_node_delay() {
+            case "$1" in CANDIDATE-C) echo 10 ;; CANDIDATE-D) echo 20 ;; esac
+        }
+        api_get() {
+            case "$1" in
+                /rules) jq -n --arg group "$(cat "$group_file")" '{rules:[{type:"MATCH",proxy:$group}]}' ;;
+                "/proxies/Old Group") jq -n --arg node "$(cat "$old_node")" '{now:$node}' ;;
+                "/proxies/New Group") jq -n --arg node "$(cat "$new_node")" '{now:$node}' ;;
+            esac
+        }
+        api_put() {
+            local node
+            node=$(echo "$2" | jq -r .name)
+            echo "SWITCH:$1:$node" >> "$events"
+            case "$1" in
+                "/proxies/Old Group") echo "$node" > "$old_node" ;;
+                "/proxies/New Group") echo "$node" > "$new_node" ;;
+            esac
+        }
+        restart_stash() {
+            echo RESTART-CHANGED-MATCH-TO-NEW-GROUP >> "$events"
+            echo "New Group" > "$group_file"
+            echo "CANDIDATE-C" > "$new_node"
+            return 0
+        }
+        ping() { return 0; }
+        curl() { echo HTTP-SHOULD-NOT-RUN >> "$events"; echo 204; }
+        check_connectivity() {
+            if [ "${1:-}" = "reload-follow-up" ]; then
+                echo RELOAD-PROBE >> "$events"
+                echo validated-failure
+            else
+                original_check_connectivity "$@"
+            fi
+        }
+
+        recover
+        rc=$?
+        printf 'RC=%s\n' "$rc"
+        cat "$events"
+        ''',
+    )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout
+    assert "RC=2" in output
+    assert output.count("SWITCH:/proxies/Old Group:CANDIDATE-C") == 1
+    assert "SWITCH:/proxies/Old Group:CANDIDATE-D" not in output
+    assert "SWITCH:/proxies/New Group:CANDIDATE-D" not in output
+    assert "HTTP-SHOULD-NOT-RUN" not in output
+    assert "ALTERNATE-CONFIG" not in output
+    assert "REMOTE-UPDATE" not in output
+    assert "NOTIFY:" not in output
+    assert "measurement-unresolved" in output
+    assert "次重試後仍不可用" not in output
+    assert "成功切換到" not in output
+
+
+def test_actual_switched_group_keeps_full_retry_window_while_correlation_remains_valid(
+    tmp_path, monitor_library
+):
+    result = run_library(
+        tmp_path,
+        monitor_library,
+        r'''
+        RETRY_MAX=3
+        RETRY_INTERVAL=0
+        events="$TEST_TMPDIR/valid-group-events"; : > "$events"
+        group_file="$TEST_TMPDIR/runtime-group"; echo "Old Group" > "$group_file"
+        selected="$TEST_TMPDIR/selected"; echo "ORIGINAL" > "$selected"
+        http_count="$TEST_TMPDIR/http-count"; echo 0 > "$http_count"
+        tmpfile="$TEST_TMPDIR/return-trap-fallback"; : > "$tmpfile"
+
+        log() { echo "LOG:$1" >> "$events"; }
+        notify() { echo "NOTIFY:$1:$2" >> "$events"; }
+        sleep() { :; }
+        close_connections() { :; }
+        get_routing_group() { cat "$group_file"; }
+        urlencode() { echo "$1"; }
+        get_selectable_nodes() { printf '%s\n' "JP-CANDIDATE-C" "TW-CANDIDATE-D"; }
+        test_node_delay() {
+            case "$1" in JP-CANDIDATE-C) echo 900 ;; TW-CANDIDATE-D) echo 20 ;; esac
+        }
+        api_get() {
+            case "$1" in
+                /rules) jq -n --arg group "$(cat "$group_file")" '{rules:[{type:"MATCH",proxy:$group}]}' ;;
+                "/proxies/Old Group") jq -n --arg node "$(cat "$selected")" '{now:$node}' ;;
+            esac
+        }
+        api_put() {
+            local node
+            node=$(echo "$2" | jq -r .name)
+            echo "$node" > "$selected"
+            echo "SWITCH:$node" >> "$events"
+        }
+        restart_stash() { echo RESTART-GROUP-STILL-OLD >> "$events"; return 0; }
+        ping() { return 0; }
+        curl() {
+            local count code
+            count=$(cat "$http_count")
+            echo $((count + 1)) > "$http_count"
+            echo "HTTP:$(cat "$selected")" >> "$events"
+            case "$count" in 0|1|2) code=503 ;; *) code=204 ;; esac
+            echo "$code"
+        }
+
+        switch_to_best_node
+        rc=$?
+        printf 'RC=%s\n' "$rc"
+        cat "$events"
+        ''',
+    )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout
+    assert "RC=0" in output
+    assert output.count("SWITCH:JP-CANDIDATE-C") == 1
+    assert output.count("HTTP:JP-CANDIDATE-C") == 3
+    assert output.count("SWITCH:TW-CANDIDATE-D") == 1
+    assert output.count("HTTP:TW-CANDIDATE-D") == 1
+    assert output.count("NOTIFY:") == 1
+
+
 def test_monitor_exposes_measurement_unresolved_without_starting_recovery(tmp_path, monitor_library):
     result = run_library(
         tmp_path,
