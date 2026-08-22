@@ -18,15 +18,15 @@ grep -Fq 'REPORT_SCRIPT="$SCRIPT_DIR/vpn_report.py"' "$MONITOR" \
 grep -Fq '"$PYTHON_BIN" "$REPORT_SCRIPT" "$LOG_FILE" "$period"' "$MONITOR" \
     || fail "cmd_report must delegate to vpn_report.py"
 
-# Installed and updated copies must remain runnable after the extraction.
+# Installed, updated, and uninstalled copies must remain complete after extraction.
 grep -Fq 'REPORT_SCRIPT="vpn_report.py"' "$INSTALLER" \
     || fail "installer must declare vpn_report.py as an installed dependency"
 grep -Fq 'cp "$SRC_REPORT_SCRIPT" "$INSTALL_REPORT_SCRIPT"' "$INSTALLER" \
     || fail "installer must copy vpn_report.py"
 grep -Fq 'cp "$repo/vpn_report.py" "$dest_dir/vpn_report.py"' "$MONITOR" \
     || fail "--update must copy vpn_report.py"
-grep -Fq 'vpn_report.py' "$MONITOR" \
-    || fail "uninstall/update paths must know about vpn_report.py"
+grep -Fq 'for f in vpn_monitor.sh stash_switch_config.py vpn_report.py; do' "$MONITOR" \
+    || fail "uninstall must remove vpn_report.py"
 
 # The large embedded Python implementation should no longer live in the shell entrypoint.
 if grep -Fq 'class Incident:' "$MONITOR"; then
