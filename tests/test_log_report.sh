@@ -19,6 +19,7 @@ chmod +x "$fakebin/curl"
 
 config_file="$tmpdir/config"
 log_file="$tmpdir/vpn_monitor.log"
+old_log_file="${log_file}.old"
 curl_sentinel="$tmpdir/curl-called"
 cat > "$config_file" <<EOF
 API_SECRET="test-secret"
@@ -38,8 +39,17 @@ PY
 
 write_log() {
     : > "$log_file"
+    rm -f "$old_log_file"
     while [ "$#" -gt 0 ]; do
         printf '[%s] %s\n' "$(stamp_ago "$1")" "$2" >> "$log_file"
+        shift 2
+    done
+}
+
+write_old_log() {
+    : > "$old_log_file"
+    while [ "$#" -gt 0 ]; do
+        printf '[%s] %s\n' "$(stamp_ago "$1")" "$2" >> "$old_log_file"
         shift 2
     done
 }
@@ -205,7 +215,24 @@ assert_contains "$overlap_output" "started before period"
 assert_contains "$overlap_output" "node switch API success: JP-03"
 assert_not_contains "$overlap_output" "recovery flow started"
 
-# If the log itself starts after the requested cutoff, disclose partial coverage.
+# A rotation must not hide an incident whose start is in .old and recovery is
+# in the current log. Both files are retained monitor logs and remain log-only.
+write_log \
+    1800 "    節點切換成功: JP-04 — 同步 GUI（重啟 Stash）" \
+    1740 "    成功切換到: JP-04 ✓" \
+    1740 "恢復成功（節點切換後）✓"
+write_old_log \
+    3000 "狀態: 全部檢測失敗 — 將重試 5 次再確認..." \
+    2940 "=== 開始恢復流程 ==="
+rotated_output="$(run_report 1h)"
+assert_contains "$rotated_output" "Status: RECOVERED"
+assert_contains "$rotated_output" "Incidents: 1"
+assert_contains "$rotated_output" "Recovered: 1"
+assert_contains "$rotated_output" "Unresolved: 0"
+assert_contains "$rotated_output" "Average recovery: 21m 0s"
+assert_contains "$rotated_output" "node switch API success: JP-04"
+
+# If the retained logs start after the requested cutoff, disclose partial coverage.
 write_log \
     172800 "狀態: 正常（Ping + HTTP 均正常）" \
     3600 "狀態: 正常（Ping + HTTP 均正常）"
