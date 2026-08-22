@@ -13,10 +13,12 @@ from typing import List, Optional, Tuple
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s?(.*)$")
 PERIOD_RE = re.compile(r"^([1-9]\d*)([hd])$")
-NODE_SWITCH_RE = re.compile(r"節點切換成功:\s*(.+?)\s*—")
-NODE_SWITCH_FAILURE_RE = re.compile(r"節點切換失敗（目標:\s*(.+?)）")
-NODE_FAILED_RE = re.compile(r"連通性驗證失敗\s*—\s*(.+?)\s+在\s+\d+\s+次重試後")
-NODE_VERIFIED_RE = re.compile(r"成功切換到:\s*(.+?)\s*✓")
+NODE_SWITCH_RE = re.compile(r"節點切換成功:\s*(.+)\s+—\s+同步 GUI（重啟 Stash）\s*$")
+NODE_SWITCH_FAILURE_RE = re.compile(r"節點切換失敗（目標:\s*(.+)），嘗試下一個\s*$")
+NODE_FAILED_RE = re.compile(
+    r"連通性驗證失敗\s*—\s*(.+)\s+在\s+\d+\s+次重試後仍不可用，嘗試下一個候選\s*$"
+)
+NODE_VERIFIED_RE = re.compile(r"成功切換到:\s*(.+)\s+✓\s*$")
 CONFIG_SWITCH_RE = re.compile(r"Config 切換成功:\s*(.+?)\s*$")
 
 
@@ -301,7 +303,7 @@ def main(argv):
         return 2
     try:
         report(argv[1], argv[2])
-    except ValueError:
+    except (ValueError, OverflowError):
         print("Invalid report period: %s" % argv[2], file=sys.stderr)
         return 2
     return 0
