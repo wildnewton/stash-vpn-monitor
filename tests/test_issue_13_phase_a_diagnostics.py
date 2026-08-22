@@ -80,6 +80,7 @@ if parts.hostname == "www.gstatic.com":
     ]
     if index < len(nodes_after_probe) and nodes_after_probe[index]:
         state["selected"] = nodes_after_probe[index]
+        state["group_selected"]["Default Proxy"] = nodes_after_probe[index]
 else:
     event = {"kind": "api", "method": method, "endpoint": endpoint, "data": data}
     if method == "GET" and endpoint == "/configs":
@@ -92,31 +93,70 @@ else:
                     "payload": os.environ.get("FAKE_PROBE_RULE_PAYLOAD", "www.gstatic.com"),
                     "proxy": os.environ.get("FAKE_PROBE_GROUP", "Probe Policy"),
                 },
-                {"type": "MATCH", "proxy": "Default Proxy"},
+                {"type": "MATCH", "proxy": state.get("match_group", "Default Proxy")},
             ]
         })
     elif method == "GET" and endpoint == "/proxies":
-        body = json.dumps({"proxies": {
-            "Default Proxy": {"type": "Selector", "now": state["selected"], "all": ["JP-DIAGNOSTIC", "TW-BACKUP", "HK-LAST"]},
-            "Probe Policy": {"type": "Selector", "now": "PROBE-POLICY-NODE", "all": ["PROBE-POLICY-NODE"]},
-            "JP-DIAGNOSTIC": {"type": "VLESS"},
-            "TW-BACKUP": {"type": "Trojan"},
-            "HK-LAST": {"type": "Shadowsocks"},
-            "PROBE-POLICY-NODE": {"type": "VLESS"},
-        }})
+        selectable = [
+            item for item in os.environ.get(
+                "FAKE_SELECTABLE_NODES", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
+            ).split(",") if item
+        ]
+        proxies = {
+            group: {"type": "Selector", "now": selected, "all": selectable}
+            for group, selected in state["group_selected"].items()
+        }
+        for node in sorted(set(selectable) | set(state["group_selected"].values())):
+            if node:
+                proxies[node] = {"type": "VLESS"}
+        body = json.dumps({"proxies": proxies})
     elif method == "GET" and endpoint.startswith("/proxies/") and endpoint.endswith("/delay?url=http://www.gstatic.com/generate_204&timeout=5000"):
-        body = json.dumps({"alive": True, "delay": 40})
-    elif method == "GET" and endpoint == "/proxies/Default Proxy":
-        body = json.dumps({"type": "Selector", "now": state["selected"], "all": ["JP-DIAGNOSTIC", "TW-BACKUP", "HK-LAST"]})
-    elif method == "GET" and endpoint == "/proxies/Probe Policy":
-        body = json.dumps({"type": "Selector", "now": "PROBE-POLICY-NODE", "all": ["PROBE-POLICY-NODE"]})
+        node = endpoint.removeprefix("/proxies/").split("/delay?", 1)[0]
+        delays = json.loads(os.environ.get("FAKE_NODE_DELAYS", "{}"))
+        delay = int(delays.get(node, 40))
+        body = json.dumps({"alive": delay > 0, "delay": delay})
+    elif method == "GET" and endpoint.startswith("/proxies/"):
+        group = endpoint.removeprefix("/proxies/")
+        selected = state["group_selected"].get(group, "")
+        if group == os.environ.get("TEST_ORIGINAL_GROUP", "Default Proxy"):
+            readbacks = os.environ.get("FAKE_GROUP_READBACKS", "").split(",")
+            readbacks = [item for item in readbacks if item]
+            read_index = state.get("group_read_index", 0)
+            if read_index < len(readbacks):
+                selected = "" if readbacks[read_index] == "__EMPTY__" else readbacks[read_index]
+                state["group_read_index"] = read_index + 1
+        selectable = [
+            item for item in os.environ.get(
+                "FAKE_SELECTABLE_NODES", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
+            ).split(",") if item
+        ]
+        body = json.dumps({"type": "Selector", "now": selected, "all": selectable})
     elif method == "GET" and endpoint == "/providers/proxies":
         body = json.dumps({"providers": {"airport": {"updatedAt": state["provider_generation"], "proxies": [{"name": "JP-DIAGNOSTIC"}]}}})
     elif method == "PUT" and endpoint.startswith("/proxies/"):
-        if os.environ.get("FAKE_SWITCH_APPLIES", "true") == "true":
-            state["selected"] = json.loads(data)["name"]
-        status = int(os.environ.get("FAKE_SWITCH_HTTP_STATUS", "204"))
+        put_index = state.get("proxy_put_index", 0)
+        operation = "switch" if put_index == 0 else "restore"
+        state["proxy_put_index"] = put_index + 1
+        group = endpoint.removeprefix("/proxies/")
+        target = json.loads(data)["name"]
+        applies = os.environ.get(
+            "FAKE_SWITCH_APPLIES" if operation == "switch" else "FAKE_RESTORE_APPLIES",
+            "true",
+        ) == "true"
+        if applies:
+            state["group_selected"][group] = target
+            if group == os.environ.get("TEST_ORIGINAL_GROUP", "Default Proxy"):
+                state["selected"] = target
+        status = int(os.environ.get(
+            "FAKE_SWITCH_HTTP_STATUS" if operation == "switch" else "FAKE_RESTORE_HTTP_STATUS",
+            "204",
+        ))
+        transport_rc = int(os.environ.get(
+            "FAKE_SWITCH_TRANSPORT_RC" if operation == "switch" else "FAKE_RESTORE_TRANSPORT_RC",
+            "0",
+        ))
         body = json.dumps({"result": "selected"})
+        event.update({"operation": operation, "group": group, "target": target})
     elif method == "PUT" and endpoint == "/configs":
         status = int(os.environ.get("FAKE_RELOAD_HTTP_STATUS", "202"))
         transport_rc = int(os.environ.get("FAKE_RELOAD_TRANSPORT_RC", "0"))
@@ -225,7 +265,18 @@ def _diagnostic_run(
     probe_group: str = "Probe Policy",
     restart_node: str = "POST-RESTART-NODE",
     switch_http_status: int = 204,
+    switch_transport_rc: int = 0,
     switch_applies: bool = True,
+    restore_http_status: int = 204,
+    restore_transport_rc: int = 0,
+    restore_applies: bool = True,
+    restore_restart_node: str = "ORIGINAL-NODE",
+    restore_restart_rc: int = 0,
+    match_group_after_restart: str = "Default Proxy",
+    match_group_after_restore: str = "Default Proxy",
+    selectable_nodes: tuple[str, ...] = ("JP-DIAGNOSTIC", "TW-BACKUP", "HK-LAST"),
+    node_delays=None,
+    group_readbacks: tuple[str, ...] = (),
     node_after_gui: str = "",
     nodes_after_probe: tuple[str, ...] = (),
     reload_http_status: int = 202,
@@ -251,6 +302,15 @@ def _diagnostic_run(
     state_path = tmp_path / "stash-state.json"
     state_path.write_text(json.dumps({
         "selected": "ORIGINAL-NODE",
+        "group_selected": {
+            "Default Proxy": "ORIGINAL-NODE",
+            "Probe Policy": "PROBE-POLICY-NODE",
+            "Drifted Group": "ORIGINAL-NODE",
+        },
+        "match_group": "Default Proxy",
+        "restart_index": 0,
+        "proxy_put_index": 0,
+        "group_read_index": 0,
         "runtime_generation": 0,
         "provider_generation": 0,
         "probe_index": 0,
@@ -286,18 +346,34 @@ def _diagnostic_run(
         notify() { :; }
 
         restart_stash() {
-            printf '%s\n' '{"kind":"restart","api_ready":true}' >> "$FAKE_STASH_EVENTS"
+            local restart_index node restart_rc match_group api_ready
+            restart_index=$(jq -r '.restart_index // 0' "$FAKE_STASH_STATE")
+            if [ "$restart_index" -eq 0 ]; then
+                node="$TEST_RESTART_NODE"
+                restart_rc="$TEST_RESTART_RC"
+                match_group="$TEST_MATCH_GROUP_AFTER_RESTART"
+            else
+                node="$TEST_RESTORE_RESTART_NODE"
+                restart_rc="$TEST_RESTORE_RESTART_RC"
+                match_group="$TEST_MATCH_GROUP_AFTER_RESTORE"
+            fi
+            if [ "$restart_rc" -eq 0 ]; then api_ready=true; else api_ready=false; fi
+            printf '{"kind":"restart","index":%s,"api_ready":%s,"group":"%s","node":"%s"}\n' \
+                "$restart_index" "$api_ready" "$TEST_ORIGINAL_GROUP" "$node" >> "$FAKE_STASH_EVENTS"
             local tmp="$FAKE_STASH_STATE.tmp"
-            jq --arg node "$TEST_RESTART_NODE" '.selected = $node' "$FAKE_STASH_STATE" > "$tmp"
+            jq --arg node "$node" --arg group "$TEST_ORIGINAL_GROUP" --arg match "$match_group" \
+                '.selected = $node | .group_selected[$group] = $node | .match_group = $match | .restart_index += 1' \
+                "$FAKE_STASH_STATE" > "$tmp"
             mv "$tmp" "$FAKE_STASH_STATE"
-            return 0
+            return "$restart_rc"
         }
 
         get_gui_selected_node() {
             printf '%s\n' '{"kind":"gui_readback","node":"GUI-POST-RESTART-NODE"}' >> "$FAKE_STASH_EVENTS"
             if [ -n "$TEST_NODE_AFTER_GUI" ]; then
                 local tmp="$FAKE_STASH_STATE.tmp"
-                jq --arg node "$TEST_NODE_AFTER_GUI" '.selected = $node' "$FAKE_STASH_STATE" > "$tmp"
+                jq --arg node "$TEST_NODE_AFTER_GUI" --arg group "$TEST_ORIGINAL_GROUP" \
+                    '.selected = $node | .group_selected[$group] = $node' "$FAKE_STASH_STATE" > "$tmp"
                 mv "$tmp" "$FAKE_STASH_STATE"
             fi
             echo "GUI-POST-RESTART-NODE"
@@ -322,14 +398,27 @@ def _diagnostic_run(
         "MONITOR_LIBRARY": str(monitor_library),
         "TEST_TMPDIR": str(tmp_path),
         "TEST_MAX_ATTEMPTS": str(max_attempts),
+        "TEST_ORIGINAL_GROUP": "Default Proxy",
         "TEST_RESTART_NODE": restart_node,
+        "TEST_RESTART_RC": "0",
+        "TEST_RESTORE_RESTART_NODE": restore_restart_node,
+        "TEST_RESTORE_RESTART_RC": str(restore_restart_rc),
+        "TEST_MATCH_GROUP_AFTER_RESTART": match_group_after_restart,
+        "TEST_MATCH_GROUP_AFTER_RESTORE": match_group_after_restore,
         "TEST_NODE_AFTER_GUI": node_after_gui,
         "FAKE_STASH_STATE": str(state_path),
         "FAKE_STASH_EVENTS": str(events_path),
         "FAKE_PROBE_CODES": probe_codes,
         "FAKE_PROBE_GROUP": probe_group,
         "FAKE_SWITCH_HTTP_STATUS": str(switch_http_status),
+        "FAKE_SWITCH_TRANSPORT_RC": str(switch_transport_rc),
         "FAKE_SWITCH_APPLIES": "true" if switch_applies else "false",
+        "FAKE_RESTORE_HTTP_STATUS": str(restore_http_status),
+        "FAKE_RESTORE_TRANSPORT_RC": str(restore_transport_rc),
+        "FAKE_RESTORE_APPLIES": "true" if restore_applies else "false",
+        "FAKE_SELECTABLE_NODES": ",".join(selectable_nodes),
+        "FAKE_NODE_DELAYS": json.dumps(node_delays or {}),
+        "FAKE_GROUP_READBACKS": ",".join(group_readbacks),
         "FAKE_NODES_AFTER_PROBE": ",".join(nodes_after_probe),
         "FAKE_RELOAD_HTTP_STATUS": str(reload_http_status),
         "FAKE_RELOAD_TRANSPORT_RC": str(reload_transport_rc),
@@ -443,6 +532,26 @@ def _provider_update_record(output: str) -> dict[str, str]:
     assert body, f"missing structured response body evidence\n{line}"
     record["result"] = body.group(1)
     return record
+
+
+def _restore_record(output: str) -> dict[str, str]:
+    lines = [line for line in output.splitlines() if line.startswith("DIAG restore=")]
+    assert len(lines) == 1, f"expected one structured restore record\n{output}"
+    line = lines[0]
+    pattern = re.compile(
+        r"^DIAG restore=(?P<restore>success|failure) "
+        r"requested_group=(?P<requested_group>.*?) "
+        r"requested_node=(?P<requested_node>\S+) "
+        r"transport=(?P<transport>ok|failed) "
+        r"http_status=(?P<http_status>\S+) "
+        r"restart=(?P<restart>api-ready|api-unavailable) "
+        r"pre-restart_selection=(?P<pre-restart_selection>\S+) "
+        r"post-restart_selection=(?P<post-restart_selection>\S+)"
+        r"(?: result=.*)?$"
+    )
+    match = pattern.fullmatch(line)
+    assert match, f"incomplete structured restore evidence\n{line}"
+    return match.groupdict()
 
 
 def test_live_diagnostic_distinguishes_restart_and_every_probe_readback(tmp_path, monitor_library):
@@ -888,6 +997,201 @@ def test_subscribed_whole_config_runs_only_its_applicable_remote_update_diagnost
     assert provider_puts == []
     _assert_fields_share_a_line(result.stdout, "whole_config_update", "applicable", "before_fingerprint", "after_fingerprint")
     _assert_fields_share_a_line(result.stdout, "provider_update", "not_applicable")
+
+
+def test_live_diagnostic_reports_success_only_after_complete_exact_group_restoration(
+    tmp_path, monitor_library
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+        restore_http_status=204,
+        restore_transport_rc=0,
+        restore_applies=True,
+        restore_restart_node="ORIGINAL-NODE",
+    )
+    assert result.returncode == 0, result.stderr
+    record = _restore_record(result.stdout)
+    assert record == {
+        "restore": "success",
+        "requested_group": "Default Proxy",
+        "requested_node": "ORIGINAL-NODE",
+        "transport": "ok",
+        "http_status": "204",
+        "restart": "api-ready",
+        "pre-restart_selection": "ORIGINAL-NODE",
+        "post-restart_selection": "ORIGINAL-NODE",
+    }
+    restore_puts = [event for event in events if event.get("operation") == "restore"]
+    assert [(event["group"], event["target"]) for event in restore_puts] == [
+        ("Default Proxy", "ORIGINAL-NODE")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "run_kwargs", "expected_evidence"),
+    [
+        (
+            "transport-failure",
+            {"restore_transport_rc": 7},
+            {"transport": "failed", "http_status": "204", "restart": "api-ready"},
+        ),
+        (
+            "http-500",
+            {"restore_http_status": 500},
+            {"transport": "ok", "http_status": "500", "restart": "api-ready"},
+        ),
+        (
+            "pre-restart-mismatch",
+            {"restore_applies": False},
+            {"pre-restart_selection": "JP-DIAGNOSTIC"},
+        ),
+        (
+            "restart-api-unavailable",
+            {"restore_restart_rc": 1},
+            {"restart": "api-unavailable"},
+        ),
+        (
+            "post-restart-mismatch-on-fixed-group",
+            {
+                "restore_restart_node": "LOST-AFTER-RESTORE",
+                "match_group_after_restore": "Drifted Group",
+            },
+            {"post-restart_selection": "LOST-AFTER-RESTORE"},
+        ),
+    ],
+)
+def test_incomplete_exact_group_restoration_is_structured_terminal_failure(
+    tmp_path, monitor_library, case, run_kwargs, expected_evidence
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+        **run_kwargs,
+    )
+    assert result.returncode != 0, f"{case}\n{result.stdout}"
+    record = _restore_record(result.stdout)
+    assert record["restore"] == "failure"
+    assert record["requested_group"] == "Default Proxy"
+    assert record["requested_node"] == "ORIGINAL-NODE"
+    for field, expected in expected_evidence.items():
+        assert record[field] == expected
+
+    if case == "post-restart-mismatch-on-fixed-group":
+        second_restart = [
+            index for index, event in enumerate(events) if event["kind"] == "restart"
+        ][1]
+        post_restore_reads = [
+            event["endpoint"]
+            for event in events[second_restart + 1 :]
+            if event["kind"] == "api" and event["method"] == "GET"
+        ]
+        assert "/proxies/Default Proxy" in post_restore_reads
+
+
+@pytest.mark.parametrize(
+    ("case", "run_kwargs"),
+    [
+        (
+            "switch-non-2xx",
+            {
+                "switch_http_status": 500,
+                "switch_applies": True,
+                "restart_node": "LOST-AFTER-RESTART",
+            },
+        ),
+        (
+            "pre-restart-readback-mismatch",
+            {
+                "switch_applies": False,
+                "restart_node": "LOST-AFTER-RESTART",
+            },
+        ),
+        (
+            "exact-group-readback-unavailable",
+            {
+                "restart_node": "LOST-AFTER-RESTART",
+                "group_readbacks": (
+                    "ORIGINAL-NODE",
+                    "ORIGINAL-NODE",
+                    "__EMPTY__",
+                    "LOST-AFTER-RESTART",
+                ),
+            },
+        ),
+    ],
+)
+def test_selection_persistence_is_unresolved_without_valid_prerequisite_evidence(
+    tmp_path, monitor_library, case, run_kwargs
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_group="Default Proxy",
+        **run_kwargs,
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    assert _hypothesis_status(result.stdout, "selection_persistence") == "unresolved", (
+        f"{case}\n{result.stdout}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("restart_node", "expected_status"),
+    [
+        ("JP-DIAGNOSTIC", "rejected"),
+        ("LOST-AFTER-RESTART", "confirmed"),
+    ],
+)
+def test_selection_persistence_classifies_only_complete_valid_evidence(
+    tmp_path, monitor_library, restart_node, expected_status
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_group="Default Proxy",
+        restart_node=restart_node,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _hypothesis_status(result.stdout, "selection_persistence") == expected_status
+
+
+@pytest.mark.parametrize(
+    ("case", "selectable_nodes", "node_delays"),
+    [
+        ("only-original-node", ("ORIGINAL-NODE",), {"ORIGINAL-NODE": 40}),
+        (
+            "all-alternatives-unreachable",
+            ("ORIGINAL-NODE", "JP-UNREACHABLE", "TW-UNREACHABLE"),
+            {"ORIGINAL-NODE": 40, "JP-UNREACHABLE": 0, "TW-UNREACHABLE": 0},
+        ),
+    ],
+)
+def test_no_delay_reachable_alternative_stops_before_reproduction_side_effects(
+    tmp_path, monitor_library, case, selectable_nodes, node_delays
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        selectable_nodes=selectable_nodes,
+        node_delays=node_delays,
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    _assert_fields_share_a_line(
+        result.stdout,
+        "reproduction",
+        "unresolved",
+        "reason",
+        "no_delay_reachable_candidate",
+    )
+    assert "requested_node=ORIGINAL-NODE" not in result.stdout
+    assert not any(event.get("operation") == "switch" for event in events)
+    assert not any(event["kind"] == "restart" for event in events)
+    assert not any(event["kind"] == "http_probe" for event in events)
 
 
 def test_non_reproduction_stops_at_the_attempt_bound_and_reports_unresolved(tmp_path, monitor_library):
