@@ -10,12 +10,14 @@ set -euo pipefail
 SCRIPT_NAME="vpn_monitor.sh"
 PLIST_NAME="com.user.vpn-monitor.plist"
 CONFIG_SWITCHER="stash_switch_config.py"
+REPORT_SCRIPT="vpn_report.py"
 
 # 來源路徑（當前目錄）
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_SCRIPT="$SRC_DIR/$SCRIPT_NAME"
 SRC_PLIST="$SRC_DIR/$PLIST_NAME"
 SRC_CONFIG_SWITCHER="$SRC_DIR/$CONFIG_SWITCHER"
+SRC_REPORT_SCRIPT="$SRC_DIR/$REPORT_SCRIPT"
 
 # 配置檔案路徑
 CONFIG_DIR="$HOME/.config/vpn_monitor"
@@ -28,6 +30,7 @@ STASH_PLIST="$HOME/Library/Group Containers/group.ws.stash.app/Library/Preferenc
 INSTALL_DIR="$HOME/.local/bin"
 INSTALL_SCRIPT="$INSTALL_DIR/$SCRIPT_NAME"
 INSTALL_CONFIG_SWITCHER="$INSTALL_DIR/$CONFIG_SWITCHER"
+INSTALL_REPORT_SCRIPT="$INSTALL_DIR/$REPORT_SCRIPT"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 INSTALL_PLIST="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 LOG_DIR="$HOME/Library/Logs"
@@ -41,6 +44,11 @@ echo ""
 if [ ! -f "$SRC_SCRIPT" ]; then
     echo "❌ 找不到 $SCRIPT_NAME"
     echo "   請在腳本所在目錄執行此安裝程式"
+    exit 1
+fi
+if [ ! -f "$SRC_REPORT_SCRIPT" ]; then
+    echo "❌ 找不到 $REPORT_SCRIPT"
+    echo "   --report 功能需要此檔案"
     exit 1
 fi
 
@@ -125,6 +133,11 @@ echo "[3/8] 安裝監控腳本..."
 cp "$SRC_SCRIPT" "$INSTALL_SCRIPT"
 chmod +x "$INSTALL_SCRIPT"
 echo "    ✓ $INSTALL_SCRIPT"
+
+# 複製 report implementation（vpn_monitor.sh --report 依賴它）
+cp "$SRC_REPORT_SCRIPT" "$INSTALL_REPORT_SCRIPT"
+chmod +x "$INSTALL_REPORT_SCRIPT"
+echo "    ✓ $INSTALL_REPORT_SCRIPT"
 
 # 也複製 config switcher（vpn_monitor.sh 依賴它）
 if [ -f "$SRC_CONFIG_SWITCHER" ]; then

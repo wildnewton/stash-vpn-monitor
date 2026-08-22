@@ -19,6 +19,7 @@
 #   ./vpn_monitor.sh --test       # 測試模式（不切換節點，只報告）
 #   ./vpn_monitor.sh --live-test  # 實戰測試（真正切換節點 + 刷新訂閱，事後恢復）
 #   ./vpn_monitor.sh --status     # 顯示當前狀態
+#   ./vpn_monitor.sh --report <period>  # 分析過去一段時間的日誌（e.g. 24h, 7d）
 #   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
 #   ./vpn_monitor.sh --set-interval <秒數>  # 設定檢查間隔（e.g. 300 = 5 分鐘）
 #   ./vpn_monitor.sh --change-config [<name>]  # 切換 config（無參數=自動換一個不同 config）
@@ -56,6 +57,7 @@ SELECTOR_GROUP="${SELECTOR_GROUP:-SsdAirport}"
 # Config switcher Python script（透過 AX API 點擊 Stash UI）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_SWITCHER="$SCRIPT_DIR/stash_switch_config.py"
+REPORT_SCRIPT="$SCRIPT_DIR/vpn_report.py"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # Git repo 路徑（用於版本檢測與 --update）
@@ -1223,6 +1225,38 @@ cmd_live_test() {
     echo ""
 }
 
+cmd_report() {
+    local period="${1:-}"
+    if [ -z "$period" ]; then
+        echo "Usage: vpn_monitor.sh --report <period>" >&2
+        echo "Examples: 1h, 24h, 1d, 7d" >&2
+        return 2
+    fi
+    if ! [[ "$period" =~ ^[1-9][0-9]*[hd]$ ]]; then
+        echo "Invalid report period: $period" >&2
+        echo "Usage: vpn_monitor.sh --report <period>" >&2
+        echo "Examples: 1h, 24h, 1d, 7d" >&2
+        return 2
+    fi
+    if ! has_python; then
+        echo "Error: Python is required for --report ($PYTHON_BIN)" >&2
+        return 1
+    fi
+    local report_script="$REPORT_SCRIPT"
+    if [ ! -f "$report_script" ]; then
+        local repo
+        repo=$(detect_repo 2>/dev/null)
+        if [ -n "$repo" ] && [ -f "$repo/vpn_report.py" ]; then
+            report_script="$repo/vpn_report.py"
+        else
+            echo "Error: report script not found: $REPORT_SCRIPT" >&2
+            return 1
+        fi
+    fi
+
+    "$PYTHON_BIN" "$report_script" "$LOG_FILE" "$period"
+}
+
 cmd_status() {
     echo "=== VPN 狀態 ==="
 
@@ -1355,6 +1389,7 @@ cmd_update() {
 
     cp "$repo/vpn_monitor.sh" "$dest_dir/vpn_monitor.sh" && updated=$((updated + 1))
     cp "$repo/stash_switch_config.py" "$dest_dir/stash_switch_config.py" && updated=$((updated + 1))
+    cp "$repo/vpn_report.py" "$dest_dir/vpn_report.py" && updated=$((updated + 1))
 
     echo "  已更新 ${updated} 個檔案"
     echo ""
@@ -1719,7 +1754,7 @@ cmd_uninstall() {
     echo ""
     echo "[3/4] 移除監控腳本..."
     local removed_files=0
-    for f in vpn_monitor.sh stash_switch_config.py; do
+    for f in vpn_monitor.sh stash_switch_config.py vpn_report.py; do
         if [ -f "$install_dir/$f" ]; then
             rm -f "$install_dir/$f"
             echo "    ✓ 已移除: $install_dir/$f"
@@ -1766,6 +1801,7 @@ case "${1:-}" in
     --test)               cmd_test ;;
     --live-test)          cmd_live_test ;;
     --status)             cmd_status ;;
+    --report)             cmd_report "${2:-}" ;;
     --update)             cmd_update ;;
     --set-interval)       cmd_set_interval "${2:-}" ;;
     --change-config)       cmd_change_config "${2:-}" ;;
