@@ -60,7 +60,7 @@ cd vpn-monitor
 vpn_monitor.sh                      # 正常監控（LaunchAgent 自動呼叫）
 vpn_monitor.sh --status             # 顯示當前狀態（含版本資訊）
 vpn_monitor.sh --test               # 測試模式（不切換，只報告）
-vpn_monitor.sh --live-test          # 實戰測試（真正切換 + 恢復）
+vpn_monitor.sh --live-test          # Phase A 有界診斷（會切換/重啟/刷新，執行前需核准）
 vpn_monitor.sh --change-config <name>   # 切換 config
 vpn_monitor.sh --switch-to-best-node    # 自動搜尋並切換最佳節點
 vpn_monitor.sh --update             # 用 git pull 更新腳本

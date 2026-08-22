@@ -17,7 +17,7 @@
 # 用法：
 #   ./vpn_monitor.sh              # 正常監控
 #   ./vpn_monitor.sh --test       # 測試模式（不切換節點，只報告）
-#   ./vpn_monitor.sh --live-test  # 實戰測試（真正切換節點 + 刷新訂閱，事後恢復）
+#   ./vpn_monitor.sh --live-test  # Phase A 有界診斷（會改變 Stash 狀態，需事先核准）
 #   ./vpn_monitor.sh --status     # 顯示當前狀態
 #   ./vpn_monitor.sh --report <period>  # 分析過去一段時間的日誌（e.g. 24h, 7d）
 #   ./vpn_monitor.sh --update     # 用 git pull 更新腳本到最新版
@@ -918,311 +918,349 @@ cmd_test() {
     echo "（測試模式不會執行任何切換操作）"
 }
 
+# ===================== Phase A 診斷 =====================
+# 這些 helper 只由 --live-test 使用；正常 monitor/recover 路徑不會呼叫。
+
+diagnostic_text_fingerprint() {
+    cksum | awk '{print $1 ":" $2}'
+}
+
+diagnostic_runtime_fingerprint() {
+    {
+        api_get /configs
+        api_get /proxies
+        api_get /providers/proxies
+    } | diagnostic_text_fingerprint
+}
+
+diagnostic_config_fingerprint() {
+    if [ ! -f "$STASH_CONFIG" ]; then
+        echo "missing"
+        return
+    fi
+    cksum "$STASH_CONFIG" 2>/dev/null | awk '{print $1 ":" $2}'
+}
+
+# 回傳：<HTTP status><TAB><單行 response body>
+diagnostic_api_put() {
+    local endpoint="$1"
+    local payload="$2"
+    local body_file status rc body
+    body_file=$(mktemp)
+    status=$(curl -s -m 10 -X PUT \
+        -H "Authorization: Bearer $API_SECRET" \
+        -H "Content-Type: application/json" \
+        -d "$payload" -o "$body_file" -w "%{http_code}" \
+        "$API_BASE$endpoint" 2>/dev/null)
+    rc=$?
+    body=$(tr '\n\t' '  ' < "$body_file" 2>/dev/null)
+    rm -f "$body_file"
+    if [ $rc -ne 0 ] || [ -z "$status" ]; then
+        status="000"
+    fi
+    printf '%s\t%s\n' "$status" "${body:-empty}"
+}
+
+diagnostic_active_config_model() {
+    if [ ! -f "$STASH_CONFIG" ]; then
+        echo "unknown"
+        return
+    fi
+
+    local has_subscribed=false
+    local has_provider=false
+    local has_use_url=false
+    grep -qE '^[[:space:]]*#SUBSCRIBED[[:space:]]+' "$STASH_CONFIG" 2>/dev/null && has_subscribed=true
+    grep -qE '^[[:space:]]*proxy-providers:[[:space:]]*$' "$STASH_CONFIG" 2>/dev/null && has_provider=true
+    grep -qE '^[[:space:]]*use-url:[[:space:]]*' "$STASH_CONFIG" 2>/dev/null && has_use_url=true
+
+    if $has_subscribed && $has_provider; then
+        echo "combination"
+    elif $has_subscribed; then
+        echo "subscribed-whole-config"
+    elif $has_provider; then
+        echo "proxy-provider"
+    elif $has_use_url; then
+        echo "use-url"
+    else
+        echo "inline"
+    fi
+}
+
+diagnostic_probe_route() {
+    local host
+    host=$(printf '%s' "$HTTP_URL" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')
+    api_get /rules | jq -r --arg host "$host" '
+        (
+          ([.rules[]
+            | (.payload // "") as $payload
+            | select(
+                (((.type // "") | ascii_upcase) == "DOMAIN" and $payload == $host)
+                or (((.type // "") | ascii_upcase) == "DOMAIN-SUFFIX" and ($host | endswith($payload)))
+            )
+          ] | .[0])
+          // ([.rules[] | select(((.type // "") | ascii_upcase) == "MATCH")] | .[0])
+          // {}
+        )
+        | [(.type // "UNKNOWN"), (.payload // "*"), (.proxy // "unknown")]
+        | @tsv
+    ' 2>/dev/null
+}
+
+diagnostic_group_selected_node() {
+    local group="$1"
+    local encoded_group data
+    encoded_group=$(urlencode "$group")
+    data=$(api_get "/proxies/$encoded_group")
+    echo "$data" | jq -r '.now // empty' 2>/dev/null
+}
+
+# Production 目前沒有可靠的 node-level GUI readback API。保留明確 hook，
+# 讓受控環境可提供 readback；實機不可用時必須誠實輸出 unavailable。
+get_gui_selected_node() {
+    echo "unavailable"
+}
+
+diagnostic_select_candidate() {
+    local original_node="${1:-}"
+    local candidate_limit="${2:-10}"
+    local node delay tier score seen=0 fallback="" best="" tmpfile
+    tmpfile=$(mktemp)
+    while IFS= read -r node; do
+        [ -z "$node" ] && continue
+        [ "$node" = "$original_node" ] && continue
+        seen=$((seen + 1))
+        [ "$seen" -gt "$candidate_limit" ] && break
+        [ -z "$fallback" ] && fallback="$node"
+        delay=$(test_node_delay "$node")
+        [ "$delay" -gt 0 ] 2>/dev/null || continue
+        tier=$(node_priority_tier "$node")
+        score=$((tier * 100000 + delay))
+        printf '%012d\t%s\n' "$score" "$node" >> "$tmpfile"
+    done < <(get_selectable_nodes)
+    best=$(sort -n "$tmpfile" | head -1 | cut -f2-)
+    rm -f "$tmpfile"
+    if [ -n "$best" ]; then
+        echo "$best"
+    elif [ -n "$fallback" ]; then
+        echo "$fallback"
+    else
+        echo "$original_node"
+    fi
+}
+
 cmd_live_test() {
     echo "========================================="
-    echo " VPN Monitor — 實戰測試（3 項測試）"
+    echo " VPN Monitor — Phase A 有界診斷"
     echo "========================================="
     echo ""
-    echo "⚠️  警告：此模式會真正切換節點、刷新訂閱、切換 config！"
-    echo "    測試完成後會恢復原始狀態。"
-    echo ""
-    echo "  Test 1: 節點切換 + 連線驗證"
-    echo "  Test 2: 強制刷新訂閱 + 驗證"
-    echo "  Test 3: Config 切換 + 驗證 API"
+    echo "⚠️  此命令會切換節點、重啟 Stash、比較 config reload，並在適用時更新 provider。"
+    echo "    正常 monitor/recover 流程不會使用以下診斷操作。"
     echo ""
 
-    # ── 檢查前置條件 ──
     if ! check_api; then
-        echo "✗ Stash API 無法連接，無法執行實戰測試"
+        echo "DIAG error=stash_api_unavailable"
         return 1
     fi
-    echo "[前置] Stash API: ✓"
 
-    # ── 動態檢測路由 group 和原始狀態（適用任何 config） ──
-    local routing_group
+    local max_attempts="${PHASE_A_MAX_ATTEMPTS:-${DIAGNOSTIC_MAX_ATTEMPTS:-2}}"
+    if ! echo "$max_attempts" | grep -Eq '^[1-9][0-9]*$'; then
+        max_attempts=2
+    fi
+    local candidate_limit="${PHASE_A_CANDIDATE_LIMIT:-10}"
+    if ! echo "$candidate_limit" | grep -Eq '^[1-9][0-9]*$'; then
+        candidate_limit=10
+    fi
+    local settle_seconds="${PHASE_A_SETTLE_SECONDS:-3}"
+    if ! echo "$settle_seconds" | grep -Eq '^[0-9]+$' || [ "$settle_seconds" -gt 30 ]; then
+        settle_seconds=3
+    fi
+
+    local model routing_group original_node requested_node requested_delay
+    model=$(diagnostic_active_config_model)
     routing_group=$(get_routing_group)
-    echo "[前置] 路由 group: ${routing_group}"
-
-    local original_node
     original_node=$(get_current_node)
-    echo "[前置] 原始節點: ${original_node:-（空）}"
+    requested_node=$(diagnostic_select_candidate "$original_node" "$candidate_limit")
+    requested_delay=0
 
-    local original_config=""
-    if [ -f "$CONFIG_SWITCHER" ] && has_python; then
-        original_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-        echo "[前置] 原始配置: ${original_config:-unknown}"
+    echo "DIAG active_config_model=${model} candidate_limit=${candidate_limit} delay_timeout_ms=${DELAY_TIMEOUT}"
+    if [ -z "$requested_node" ]; then
+        echo "DIAG reproduction=unresolved reason=no_delay_reachable_candidate attempt_bound=${max_attempts}"
+        return 0
     fi
+    requested_delay=$(test_node_delay "$requested_node")
 
-    local overall_pass=true
-    local passed=0
-    local failed=0
-
-    # ════════════════════════════════════════════
-    # Test 1: 節點切換（使用動態檢測的路由 group）
-    # ════════════════════════════════════════════
-    echo ""
-    echo "─────────────────────────────────────────"
-    echo " [TEST 1] 切換到最佳非 HK 節點 + 驗證連線"
-    echo "─────────────────────────────────────────"
-
-    local encoded_group
+    local encoded_group switch_result switch_status switch_body
     encoded_group=$(urlencode "$routing_group")
+    close_connections
+    switch_result=$(diagnostic_api_put "/proxies/$encoded_group" "$(jq -n --arg name "$requested_node" '{name: $name}')")
+    switch_status=${switch_result%%$'\t'*}
+    switch_body=${switch_result#*$'\t'}
+    close_connections
+    echo "DIAG requested_group=${routing_group} requested_node=${requested_node} delay_ms=${requested_delay} http_status=${switch_status} result=${switch_body}"
 
-    # 使用 switch_to_best_node（與恢復流程相同策略，測試真實路徑）
-    # 內部含節點名驗證 + 連通性重試驗證
-    echo "  使用 switch_to_best_node 切換到最佳節點（與恢復流程相同）..."
-    if switch_to_best_node; then
-        echo "  → TEST 1 PASSED"
-        passed=$((passed + 1))
+    local pre_restart_selection restart_status post_restart_selection gui_selection
+    pre_restart_selection=$(get_current_node)
+    echo "DIAG pre-restart selection=${pre_restart_selection:-empty} requested_node=${requested_node}"
+
+    if restart_stash; then
+        restart_status="api-ready"
     else
-        echo "  → TEST 1 FAILED"
-        failed=$((failed + 1))
-        overall_pass=false
+        restart_status="api-unavailable"
     fi
+    post_restart_selection=$(get_current_node)
+    echo "DIAG post-restart ${restart_status} selection=${post_restart_selection:-empty} requested_node=${requested_node}"
 
-    # ── 恢復原始節點 ──
-    echo ""
-    if [ -z "$original_node" ]; then
-        echo "  [恢復] ⚠ 原始節點為空，跳過節點恢復"
-    else
-        echo "  [恢復] 切回原始節點: ${original_node}（帶重試）..."
-        switch_node "$original_node" 5
+    gui_selection=$(get_gui_selected_node 2>/dev/null || echo "unavailable")
+    echo "DIAG gui-readback selection=${gui_selection:-unavailable}"
 
-        # 驗證恢復
-        local restored_node
-        restored_node=$(get_current_node)
-        if [ "$restored_node" = "$original_node" ]; then
-            echo "  [恢復] ✓ 已回到原始節點: ${restored_node}"
-        else
-            echo "  [恢復] ⚠ 當前節點為「${restored_node:-empty}」，未正確恢復"
-            overall_pass=false
+    local probe_route probe_rule probe_payload probe_group probe_group_selection
+    probe_route=$(diagnostic_probe_route)
+    IFS=$'\t' read -r probe_rule probe_payload probe_group <<< "$probe_route"
+    probe_rule="${probe_rule:-UNKNOWN}"
+    probe_payload="${probe_payload:-*}"
+    probe_group="${probe_group:-unknown}"
+    echo "DIAG probe_rule=${probe_rule} probe_payload=${probe_payload} probe_group=${probe_group} url=${HTTP_URL}"
+
+    local attempt probe_time_selection http_code probe_failed=false probe_succeeded=false
+    attempt=1
+    while [ "$attempt" -le "$max_attempts" ]; do
+        probe_time_selection=$(get_current_node)
+        probe_group_selection=$(diagnostic_group_selected_node "$probe_group")
+        echo "DIAG probe-time attempt=${attempt} selection=${probe_time_selection:-empty} probe_group=${probe_group} probe_group_selection=${probe_group_selection:-empty}"
+        echo "DIAG probe_group=${probe_group} switched_group=${routing_group} probe_time_selection=${probe_time_selection:-empty} probe_group_selection=${probe_group_selection:-empty} attempt=${attempt}"
+
+        http_code=$(curl -s -m "$HTTP_TIMEOUT" -x "http://127.0.0.1:$PROXY_PORT" \
+            -o /dev/null -w "%{http_code}" "$HTTP_URL" 2>/dev/null || echo "000")
+        echo "DIAG probe-result attempt=${attempt} http_status=${http_code:-000} delay_ms=${requested_delay}"
+        if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
+            probe_succeeded=true
+            break
         fi
-    fi
+        probe_failed=true
+        attempt=$((attempt + 1))
+    done
 
-    # ════════════════════════════════════════════
-    # Test 2: 訂閱刷新
-    # ════════════════════════════════════════════
-    echo ""
-    echo "─────────────────────────────────────────"
-    echo " [TEST 2] 強制刷新訂閱 + 驗證節點可用"
-    echo "─────────────────────────────────────────"
-
-    local nodes_before
-    nodes_before=$(get_proxy_nodes | wc -l | tr -d ' ')
-    echo "  刷新前節點數: ${nodes_before}"
-
-    local mtime_before=""
-    if [ -f "$STASH_CONFIG" ]; then
-        mtime_before=$(stat -f %m "$STASH_CONFIG" 2>/dev/null || echo "0")
-    fi
-
-    echo "  正在觸發訂閱刷新（PUT /configs）..."
-    api_put "/configs" '{"path":"","payload":""}' >/dev/null 2>&1
-    echo "  等待刷新完成（15 秒）..."
-    sleep 15
-
-    if ! check_api; then
-        echo "  ✗ 刷新後 API 無回應"
-        echo "  → TEST 2 FAILED"
-        failed=$((failed + 1))
-        overall_pass=false
+    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded; then
+        echo "DIAG reproduction=confirmed delay_reachable=true http_failed=true attempt_bound=${max_attempts}"
     else
-        echo "  API: ✓ 仍可用"
+        echo "DIAG reproduction=unresolved delay_reachable=$([ "$requested_delay" -gt 0 ] 2>/dev/null && echo true || echo false) attempt_bound=${max_attempts}"
+    fi
 
-        if [ -f "$STASH_CONFIG" ] && [ -n "$mtime_before" ]; then
-            local mtime_after
-            mtime_after=$(stat -f %m "$STASH_CONFIG" 2>/dev/null || echo "0")
-            if [ "$mtime_after" != "$mtime_before" ]; then
-                echo "  Config 修改時間: 已變更 ✓（刷新生效）"
-            else
-                echo "  Config 修改時間: 未變更 ⚠（可能無新內容）"
+    local reload_before_runtime reload_after_runtime reload_before_config reload_after_config
+    local force_before_runtime force_after_runtime force_before_config force_after_config
+    local reload_result reload_status reload_body force_result force_status force_body
+
+    reload_before_runtime=$(diagnostic_runtime_fingerprint)
+    reload_before_config=$(diagnostic_config_fingerprint)
+    reload_result=$(diagnostic_api_put "/configs" '{"path":"","payload":""}')
+    reload_status=${reload_result%%$'\t'*}
+    reload_body=${reload_result#*$'\t'}
+    sleep "$settle_seconds"
+    reload_after_runtime=$(diagnostic_runtime_fingerprint)
+    reload_after_config=$(diagnostic_config_fingerprint)
+    echo "DIAG endpoint=/configs http_status=${reload_status} result=${reload_body} before_runtime_fingerprint=${reload_before_runtime} after_runtime_fingerprint=${reload_after_runtime} before_config_fingerprint=${reload_before_config} after_config_fingerprint=${reload_after_config}"
+
+    force_before_runtime=$(diagnostic_runtime_fingerprint)
+    force_before_config=$(diagnostic_config_fingerprint)
+    force_result=$(diagnostic_api_put "/configs?force=true" '{"path":"","payload":""}')
+    force_status=${force_result%%$'\t'*}
+    force_body=${force_result#*$'\t'}
+    sleep "$settle_seconds"
+    force_after_runtime=$(diagnostic_runtime_fingerprint)
+    force_after_config=$(diagnostic_config_fingerprint)
+    echo "DIAG endpoint=/configs?force=true http_status=${force_status} result=${force_body} before_runtime_fingerprint=${force_before_runtime} after_runtime_fingerprint=${force_after_runtime} before_config_fingerprint=${force_before_config} after_config_fingerprint=${force_after_config}"
+
+    local whole_config_status="unresolved"
+    case "$model" in
+        subscribed-whole-config|combination)
+            echo "DIAG whole_config_update=applicable before_fingerprint=${force_before_config} after_fingerprint=${force_after_config}"
+            ;;
+        *)
+            echo "DIAG whole_config_update=not_applicable"
+            ;;
+    esac
+
+    local provider_applicable=false provider_changed=false provider_before provider_after provider_name provider_result provider_status provider_body encoded_provider
+    case "$model" in
+        proxy-provider|combination) provider_applicable=true ;;
+    esac
+    if $provider_applicable; then
+        provider_before=$(api_get /providers/proxies | diagnostic_text_fingerprint)
+        while IFS= read -r provider_name; do
+            [ -z "$provider_name" ] && continue
+            encoded_provider=$(urlencode "$provider_name")
+            provider_result=$(diagnostic_api_put "/providers/proxies/$encoded_provider" '{}')
+            provider_status=${provider_result%%$'\t'*}
+            provider_body=${provider_result#*$'\t'}
+            sleep "$settle_seconds"
+            provider_after=$(api_get /providers/proxies | diagnostic_text_fingerprint)
+            echo "DIAG provider_update=${provider_name} http_status=${provider_status} result=${provider_body} before_fingerprint=${provider_before} after_fingerprint=${provider_after}"
+            if [ "$provider_before" != "$provider_after" ]; then
+                provider_changed=true
             fi
-        fi
-
-        local nodes_after
-        nodes_after=$(get_proxy_nodes | wc -l | tr -d ' ')
-        echo "  刷新後節點數: ${nodes_after}"
-
-        local status2
-        status2=$(check_connectivity)
-        if ! is_down "$status2"; then
-            echo "  連通性: ✓（${status2}）"
-            echo "  → TEST 2 PASSED"
-            passed=$((passed + 1))
-        else
-            echo "  連通性: ✗（${status2}）"
-            echo "  → TEST 2 FAILED"
-            failed=$((failed + 1))
-            overall_pass=false
-        fi
-    fi
-
-    # ── 確保節點恢復 ──
-    sleep 2
-    routing_group=$(get_routing_group)
-    encoded_group=$(urlencode "$routing_group")
-    local mid_node
-    mid_node=$(get_current_node)
-    if [ "$mid_node" != "$original_node" ] && [ -n "$original_node" ]; then
-        echo ""
-        echo "  [恢復] 節點變更為「${mid_node}」，切回「${original_node}」"
-        switch_node "$original_node" 5
-    fi
-
-    # ════════════════════════════════════════════
-    # Test 3: Config 切換（動態選擇不同的 config）
-    # ════════════════════════════════════════════
-    echo ""
-    echo "─────────────────────────────────────────"
-    echo " [TEST 3] Config 切換 + 驗證 API"
-    echo "─────────────────────────────────────────"
-
-    if [ ! -f "$CONFIG_SWITCHER" ]; then
-        echo "  ✗ stash_switch_config.py 不存在，跳過"
-        echo "  → TEST 3 SKIPPED"
-    elif ! has_python; then
-        echo "  ✗ Python 環境不存在（command -v 失敗），跳過"
-        echo "  → TEST 3 SKIPPED"
+            provider_before="$provider_after"
+        done < <(api_get /providers/proxies | jq -r '.providers | keys[]?' 2>/dev/null)
     else
-        # 動態檢測當前 config
-        local test3_original_config
-        test3_original_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-        echo "  當前 config: ${test3_original_config:-unknown}"
-
-        # 動態取得所有可用 config
-        local all_configs
-        all_configs=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --list 2>/dev/null)
-        echo "  可用 config: $(echo "$all_configs" | tr '\n' ' ')"
-
-        if [ -z "$test3_original_config" ] || [ "$test3_original_config" = "unknown" ]; then
-            echo "  ✗ 無法檢測當前 config"
-            echo "  → TEST 3 FAILED"
-            failed=$((failed + 1))
-            overall_pass=false
-        elif [ -z "$all_configs" ]; then
-            echo "  ✗ 無法取得 config 列表"
-            echo "  → TEST 3 FAILED"
-            failed=$((failed + 1))
-            overall_pass=false
-        else
-            # 從列表中找一個不同的 config 作為目標
-            local target_config=""
-            while IFS= read -r cfg; do
-                [ -z "$cfg" ] && continue
-                if [ "$cfg" != "$test3_original_config" ]; then
-                    target_config="$cfg"
-                    break
-                fi
-            done <<< "$all_configs"
-
-            if [ -z "$target_config" ]; then
-                echo "  ✗ 沒有其他可切換的 config"
-                echo "  → TEST 3 SKIPPED（只有一個 config）"
-            else
-                echo "  目標 config: ${target_config}"
-
-                # 執行切換（使用共用函數）
-                echo "  正在切換到 ${target_config}..."
-                if switch_config "$target_config"; then
-                    # 驗證 config 是否切換
-                    local new_config
-                    new_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-                    if [ "$new_config" = "$target_config" ]; then
-                        echo "  Config 切換確認: ✓（當前: ${new_config}）"
-                    else
-                        echo "  Config 切換確認: ⚠ API 顯示「${new_config}」（目標: ${target_config}）"
-                    fi
-
-                    # 驗證連通性
-                    sleep 3
-                    local status3
-                    status3=$(check_connectivity)
-                    if ! is_down "$status3"; then
-                        echo "  連通性: ✓（${status3}）"
-                        echo "  → TEST 3 PASSED"
-                        passed=$((passed + 1))
-                    else
-                        echo "  連通性: ✗（${status3}，可能新 config 需要手動選節點）"
-                        echo "  → TEST 3 PARTIAL（切換成功但連線需手動）"
-                        passed=$((passed + 1))
-                    fi
-
-                    # ── 恢復原始 config ──
-                    echo ""
-                    echo "  [恢復] 切回原始 config: ${test3_original_config}"
-                    if switch_config "$test3_original_config"; then
-                        echo "  [恢復] Config ✓"
-                    else
-                        echo "  [恢復] ⚠ 切換回原始 config 失敗"
-                        echo "  → TEST 3 FAILED（未恢復到原始配置）"
-                        if [ $passed -gt 0 ] 2>/dev/null; then
-                            passed=$((passed - 1))
-                        fi
-                        failed=$((failed + 1))
-                        overall_pass=false
-                    fi
-                else
-                    echo "  ✗ Config 切換失敗"
-                    echo "  → TEST 3 FAILED"
-                    failed=$((failed + 1))
-                    overall_pass=false
-                fi
-
-                # 恢復節點（config 切換後 group 可能變化）
-                if [ -n "$original_node" ]; then
-                    switch_node "$original_node" 5
-
-                    local restored_node
-                    restored_node=$(get_current_node)
-                    if [ "$restored_node" = "$original_node" ]; then
-                        echo "  [恢復] 節點 ✓（${restored_node}）"
-                    elif [ -z "$restored_node" ]; then
-                        echo "  [恢復] 節點 ⚠ 為空（可能配置不匹配）"
-                    else
-                        echo "  [恢復] 節點 ⚠「${restored_node}」≠ 目標「${original_node}」"
-                    fi
-                fi
-            fi
-        fi
+        echo "DIAG provider_update=not_applicable"
     fi
 
-    # ════════════════════════════════════════════
-    # 最終驗證
-    # ════════════════════════════════════════════
-    echo ""
-    echo "─────────────────────────────────────────"
-    echo " 最終狀態驗證"
-    echo "─────────────────────────────────────────"
-
-    local final_group final_node final_status
-    final_group=$(get_routing_group)
-    final_node=$(get_current_node)
-    final_status=$(check_connectivity)
-
-    echo "  路由 group: ${final_group}"
-    echo "  當前節點: ${final_node}"
-    echo "  連通性: ${final_status}"
-
-    if [ -f "$CONFIG_SWITCHER" ] && has_python; then
-        local final_config
-        final_config=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
-        echo "  當前配置: ${final_config:-unknown}"
-    fi
-
-    # 總結
-    echo ""
-    echo "========================================="
-    echo " 測試結果總結"
-    echo "========================================="
-    echo "  PASS: ${passed}"
-    echo "  FAIL: ${failed}"
-
-    if $overall_pass; then
-        echo "  狀態: ✅ 全部通過"
+    local selection_status routing_status runtime_status whole_status provider_state_status shared_status
+    if [ -n "$pre_restart_selection" ] && [ "$post_restart_selection" = "$pre_restart_selection" ]; then
+        selection_status="rejected"
+    elif [ -n "$pre_restart_selection" ] && [ -n "$post_restart_selection" ]; then
+        selection_status="confirmed"
     else
-        echo "  狀態: ❌ 有 ${failed} 項失敗"
+        selection_status="unresolved"
     fi
-    echo ""
+    if [ "$probe_group" != "unknown" ] && [ "$probe_group" != "$routing_group" ]; then
+        routing_status="confirmed"
+    elif [ "$probe_group" = "$routing_group" ]; then
+        routing_status="rejected"
+    else
+        routing_status="unresolved"
+    fi
+    if [ "$reload_before_runtime" != "$reload_after_runtime" ]; then
+        runtime_status="confirmed"
+    else
+        runtime_status="rejected"
+    fi
+    case "$model" in
+        subscribed-whole-config|combination)
+            if [ "$force_before_config" != "$force_after_config" ]; then whole_status="confirmed"; else whole_status="unresolved"; fi
+            ;;
+        *) whole_status="unresolved" ;;
+    esac
+    if $provider_applicable && $provider_changed; then
+        provider_state_status="confirmed"
+    else
+        provider_state_status="unresolved"
+    fi
+    if [ "$requested_delay" -gt 0 ] 2>/dev/null && $probe_failed && ! $probe_succeeded && [ "$routing_status" = "rejected" ] && [ "$selection_status" = "rejected" ]; then
+        shared_status="confirmed"
+    else
+        shared_status="unresolved"
+    fi
+
+    echo "DIAG hypothesis=selection_persistence status=${selection_status}"
+    echo "DIAG hypothesis=probe_routing_mismatch status=${routing_status}"
+    echo "DIAG hypothesis=runtime_config_reload status=${runtime_status}"
+    echo "DIAG hypothesis=whole_config_subscription status=${whole_status}"
+    echo "DIAG hypothesis=proxy_provider_state status=${provider_state_status}"
+    echo "DIAG hypothesis=shared_data_path status=${shared_status}"
+
+    # Best-effort restoration. Readback is logged because the operation under
+    # investigation may itself lose selection across restart.
+    if [ -n "$original_node" ] && [ "$original_node" != "$requested_node" ]; then
+        local restore_result restore_pre restore_post
+        restore_result=$(diagnostic_api_put "/proxies/$encoded_group" "$(jq -n --arg name "$original_node" '{name: $name}')")
+        restore_pre=$(get_current_node)
+        restart_stash >/dev/null 2>&1 || true
+        restore_post=$(get_current_node)
+        echo "DIAG restore requested_node=${original_node} pre-restart_selection=${restore_pre:-empty} post-restart_selection=${restore_post:-empty} result=${restore_result#*$'\t'}"
+    fi
+
+    return 0
 }
 
 cmd_report() {
