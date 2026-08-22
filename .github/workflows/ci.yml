@@ -25,10 +25,12 @@ jobs:
           bash -n tests/test_ci_workflow.sh
           bash -n tests/test_node_ranking_policy.sh
           bash -n tests/test_log_report.sh
+          bash -n tests/test_report_module_layout.sh
 
       - name: Python syntax check
         run: |
           python3 -m py_compile stash_switch_config.py
+          python3 -m py_compile vpn_report.py
 
       - name: Regression tests
         run: |
@@ -37,3 +39,4 @@ jobs:
           bash tests/test_ci_workflow.sh
           bash tests/test_node_ranking_policy.sh
           bash tests/test_log_report.sh
+          bash tests/test_report_module_layout.sh
