@@ -1,0 +1,32 @@
+name: Apply report extraction
+
+on:
+  push:
+    branches: [issue-10-log-status-report]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: issue-10-log-status-report
+
+      - name: Apply deterministic extraction
+        run: python3 .github/scripts/apply_report_extraction.py
+
+      - name: Commit generated refactor
+        run: |
+          if git diff --quiet -- vpn_monitor.sh; then
+            echo "No extraction changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vpn_monitor.sh
+          git commit -m "refactor: delegate reports to vpn_report module"
+          git push origin HEAD:issue-10-log-status-report
