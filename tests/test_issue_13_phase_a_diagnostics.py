@@ -132,9 +132,11 @@ else:
             config_path.write_text(config_path.read_text() + "# refreshed\n")
         body = json.dumps({"result": "accepted", "forced": True})
     elif method == "PUT" and endpoint == "/providers/proxies/airport":
-        state["provider_generation"] += 1
-        status = 204
-        body = json.dumps({"result": "provider-updated"})
+        if os.environ.get("FAKE_PROVIDER_CHANGES_FINGERPRINT", "true") == "true":
+            state["provider_generation"] += 1
+        status = int(os.environ.get("FAKE_PROVIDER_HTTP_STATUS", "204"))
+        transport_rc = int(os.environ.get("FAKE_PROVIDER_TRANSPORT_RC", "0"))
+        body = os.environ.get("FAKE_PROVIDER_BODY", "provider-updated")
     elif method == "DELETE" and endpoint == "/connections":
         status = 204
 
@@ -232,8 +234,13 @@ def _diagnostic_run(
     force_http_status: int = 202,
     force_transport_rc: int = 0,
     force_changes_config: bool = False,
+    provider_http_status: int = 204,
+    provider_transport_rc: int = 0,
+    provider_changes_fingerprint: bool = True,
+    provider_body: str = "provider-updated",
     probe_rule_type: str = "DOMAIN",
     probe_rule_payload: str = "www.gstatic.com",
+    diagnostic_probe_route: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake_bin = tmp_path / "fake-bin"
@@ -298,6 +305,12 @@ def _diagnostic_run(
         get_gui_current_node() { get_gui_selected_node; }
         read_gui_selected_node() { get_gui_selected_node; }
 
+        if [ -n "$TEST_DIAGNOSTIC_PROBE_ROUTE" ]; then
+            diagnostic_probe_route() {
+                printf '%s\n' "$TEST_DIAGNOSTIC_PROBE_ROUTE"
+            }
+        fi
+
         export PHASE_A_MAX_ATTEMPTS="$TEST_MAX_ATTEMPTS"
         export DIAGNOSTIC_MAX_ATTEMPTS="$TEST_MAX_ATTEMPTS"
         cmd_live_test
@@ -324,9 +337,14 @@ def _diagnostic_run(
         "FAKE_FORCE_HTTP_STATUS": str(force_http_status),
         "FAKE_FORCE_TRANSPORT_RC": str(force_transport_rc),
         "FAKE_FORCE_CHANGES_CONFIG": "true" if force_changes_config else "false",
+        "FAKE_PROVIDER_HTTP_STATUS": str(provider_http_status),
+        "FAKE_PROVIDER_TRANSPORT_RC": str(provider_transport_rc),
+        "FAKE_PROVIDER_CHANGES_FINGERPRINT": "true" if provider_changes_fingerprint else "false",
+        "FAKE_PROVIDER_BODY": provider_body,
         "FAKE_STASH_CONFIG": str(stash_dir / "config.yaml"),
         "FAKE_PROBE_RULE_TYPE": probe_rule_type,
         "FAKE_PROBE_RULE_PAYLOAD": probe_rule_payload,
+        "TEST_DIAGNOSTIC_PROBE_ROUTE": diagnostic_probe_route,
         "HTTP_URL": "http://www.gstatic.com/generate_204",
     })
     result = subprocess.run(
@@ -394,6 +412,37 @@ def _hypothesis_status(output: str, hypothesis: str) -> str:
     matches = re.findall(pattern, output, re.MULTILINE)
     assert len(matches) == 1, f"expected one {hypothesis} matrix record\n{output}"
     return matches[0]
+
+
+def _phase_b_probe_status(output: str) -> str:
+    matches = re.findall(
+        r"^DIAG phase_b_probe_contract=(pass|validated-failure|measurement-unresolved)\b",
+        output,
+        re.MULTILINE,
+    )
+    assert len(matches) == 1, f"expected one Phase B probe contract record\n{output}"
+    return matches[0]
+
+
+def _provider_update_record(output: str) -> dict[str, str]:
+    lines = [line for line in output.splitlines() if line.startswith("DIAG provider_update=airport ")]
+    assert len(lines) == 1, f"expected one provider update record\n{output}"
+    line = lines[0]
+    record = {}
+    for key in (
+        "provider_update",
+        "transport",
+        "http_status",
+        "before_fingerprint",
+        "after_fingerprint",
+    ):
+        match = re.search(rf"(?:^| ){key}=(\S+)", line)
+        assert match, f"missing structured {key} evidence\n{line}"
+        record[key] = match.group(1)
+    body = re.search(r"(?:^| )result=(.*?) before_fingerprint=", line)
+    assert body, f"missing structured response body evidence\n{line}"
+    record["result"] = body.group(1)
+    return record
 
 
 def test_live_diagnostic_distinguishes_restart_and_every_probe_readback(tmp_path, monitor_library):
@@ -465,7 +514,42 @@ def test_reproduction_is_confirmed_only_when_every_correlation_gate_is_valid(tmp
     _assert_fields_share_a_line(result.stdout, "post-restart", "selection", "JP-DIAGNOSTIC")
     diagnostic_probes = [event for event in events if event["kind"] == "http_probe"][:2]
     assert [event["selected"] for event in diagnostic_probes] == ["JP-DIAGNOSTIC", "JP-DIAGNOSTIC"]
+    assert _current_probe_route_records(result.stdout) == [
+        {
+            "probe_rule": "DOMAIN",
+            "probe_payload": "www.gstatic.com",
+            "probe_group": "Default Proxy",
+            "url": "http://www.gstatic.com/generate_204",
+        }
+    ]
     assert _reproduction_status(result.stdout) == "confirmed"
+    assert _phase_b_probe_status(result.stdout) == "validated-failure"
+
+
+def test_unresolved_route_cannot_confirm_reproduction_when_its_group_field_matches(
+    tmp_path, monitor_library
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_codes="000,000,000",
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+        probe_rule_type="DOMAIN-KEYWORD",
+        probe_rule_payload="gstatic",
+        diagnostic_probe_route="UNRESOLVED\tunsupported-current-route\tDefault Proxy",
+    )
+    assert result.returncode == 0, result.stderr
+    assert _current_probe_route_records(result.stdout) == [
+        {
+            "probe_rule": "UNRESOLVED",
+            "probe_payload": "unsupported-current-route",
+            "probe_group": "Default Proxy",
+            "url": "http://www.gstatic.com/generate_204",
+        }
+    ]
+    assert _reproduction_status(result.stdout) == "unresolved"
+    assert _phase_b_probe_status(result.stdout) == "measurement-unresolved"
 
 
 @pytest.mark.parametrize(
@@ -721,6 +805,61 @@ def test_provider_update_is_exercised_only_for_an_applicable_model(tmp_path, mon
     assert "/providers/proxies/airport" in provider_puts
     _assert_fields_share_a_line(provider_result.stdout, "provider_update", "airport", "http_status", "result")
     _assert_fields_share_a_line(provider_result.stdout, "provider_update", "before_fingerprint", "after_fingerprint")
+
+
+@pytest.mark.parametrize(
+    (
+        "case",
+        "provider_http_status",
+        "provider_transport_rc",
+        "provider_body",
+        "expected_transport",
+        "expected_hypothesis",
+    ),
+    [
+        ("successful-2xx", 204, 0, "provider-updated", "ok", "confirmed"),
+        ("http-500", 500, 0, "provider-rejected", "ok", "unresolved"),
+        ("transport-failure", 204, 7, "response-before-disconnect", "failed", "unresolved"),
+    ],
+)
+def test_provider_hypothesis_and_record_require_operation_specific_transport_evidence(
+    tmp_path,
+    monitor_library,
+    case,
+    provider_http_status,
+    provider_transport_rc,
+    provider_body,
+    expected_transport,
+    expected_hypothesis,
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        config_model="proxy_provider",
+        provider_http_status=provider_http_status,
+        provider_transport_rc=provider_transport_rc,
+        provider_changes_fingerprint=True,
+        provider_body=provider_body,
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    assert _hypothesis_status(result.stdout, "proxy_provider_state") == expected_hypothesis
+
+    provider_events = [
+        event
+        for event in events
+        if event["kind"] == "api"
+        and event["method"] == "PUT"
+        and event["endpoint"] == "/providers/proxies/airport"
+    ]
+    assert len(provider_events) == 1
+    assert provider_events[0]["status"] == provider_http_status
+
+    record = _provider_update_record(result.stdout)
+    assert record["provider_update"] == "airport"
+    assert record["transport"] == expected_transport
+    assert record["http_status"] == str(provider_http_status)
+    assert record["result"] == provider_body
+    assert record["before_fingerprint"] != record["after_fingerprint"]
 
 
 def test_remote_updates_are_skipped_when_the_inline_model_is_not_applicable(tmp_path, monitor_library):

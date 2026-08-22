@@ -1340,7 +1340,7 @@ cmd_live_test() {
             ;;
     esac
 
-    local provider_applicable=false provider_changed=false provider_before provider_after provider_name provider_result provider_status provider_body encoded_provider
+    local provider_applicable=false provider_changed=false provider_before provider_after provider_name provider_result provider_transport provider_status provider_body encoded_provider
     case "$model" in
         proxy-provider|combination) provider_applicable=true ;;
     esac
@@ -1349,12 +1349,11 @@ cmd_live_test() {
         while IFS= read -r provider_name; do
             [ -z "$provider_name" ] && continue
             encoded_provider=$(urlencode "$provider_name")
-            provider_result=$(diagnostic_api_put "/providers/proxies/$encoded_provider" '{}')
-            provider_status=${provider_result%%$'\t'*}
-            provider_body=${provider_result#*$'\t'}
+            provider_result=$(api_put_status "/providers/proxies/$encoded_provider" '{}')
+            IFS=$'\t' read -r provider_transport provider_status provider_body <<< "$provider_result"
             sleep "$settle_seconds"
             provider_after=$(api_get /providers/proxies | diagnostic_text_fingerprint)
-            echo "DIAG provider_update=${provider_name} http_status=${provider_status} result=${provider_body} before_fingerprint=${provider_before} after_fingerprint=${provider_after}"
+            echo "DIAG provider_update=${provider_name} transport=${provider_transport} http_status=${provider_status} result=${provider_body} before_fingerprint=${provider_before} after_fingerprint=${provider_after}"
             if [ "$provider_before" != "$provider_after" ] && [ "$provider_status" -ge 200 ] && [ "$provider_status" -lt 300 ] 2>/dev/null; then
                 provider_changed=true
             fi
@@ -1404,7 +1403,7 @@ cmd_live_test() {
             ;;
         *) whole_status="unresolved" ;;
     esac
-    if $provider_applicable && $provider_changed; then
+    if $provider_applicable && $provider_changed && [ "$provider_transport" = "ok" ] && [ "$provider_status" -ge 200 ] 2>/dev/null && [ "$provider_status" -lt 300 ] 2>/dev/null; then
         provider_state_status="confirmed"
     else
         provider_state_status="unresolved"
