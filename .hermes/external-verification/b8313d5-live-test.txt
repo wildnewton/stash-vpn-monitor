@@ -1,0 +1,39 @@
+=========================================
+ VPN Monitor — Phase A 有界診斷
+=========================================
+
+⚠️  此命令會切換節點、重啟 Stash、比較 config reload，並在適用時更新 provider。
+    正常 monitor/recover 流程不會使用以下診斷操作。
+
+DIAG active_config_model=subscribed-whole-config candidate_limit=10 delay_timeout_ms=5000
+DIAG requested_group=Default Proxy requested_node=SG-X5-2 delay_ms=53 http_status=204 result=empty
+DIAG pre-restart selection=SG-X5-2 requested_node=SG-X5-2
+  正在退出 Stash...
+  正在啟動 Stash...
+  Stash 進程已啟動 ✓，等待 API 恢復...
+  Stash 已重啟完成，API 可用 ✓
+DIAG post-restart api-ready selection=SG-X5-2 requested_node=SG-X5-2
+DIAG gui-readback selection=unavailable
+DIAG legacy_probe_rule=UNRESOLVED legacy_probe_payload=RULE-SET(CLASSICAL) legacy_probe_group=direct-union-minus-overlap url=http://www.gstatic.com/generate_204
+DIAG legacy_probe_group=direct-union-minus-overlap switched_group=Default Proxy probe_time_selection=SG-X5-2
+DIAG probe_rule=UNRESOLVED probe_payload=RULE-SET(CLASSICAL) probe_group=direct-union-minus-overlap url=http://example.com/
+DIAG probe-time attempt=1 selection=SG-X5-2 probe_group=direct-union-minus-overlap probe_group_selection=empty
+DIAG probe_group=direct-union-minus-overlap switched_group=Default Proxy probe_time_selection=SG-X5-2 probe_group_selection=empty
+DIAG probe-result attempt=1 http_status=200 delay_ms=53
+DIAG probe-time attempt=2 selection=SG-X5-2 probe_group=direct-union-minus-overlap probe_group_selection=empty
+DIAG probe_group=direct-union-minus-overlap switched_group=Default Proxy probe_time_selection=SG-X5-2 probe_group_selection=empty
+DIAG probe-result attempt=2 http_status=200 delay_ms=53
+DIAG reproduction=unresolved delay_reachable=true route_correlation=false attempt_bound=2
+DIAG phase_b_probe_contract=measurement-unresolved intended_group=Default Proxy expected_node=SG-X5-2
+DIAG endpoint=/configs transport=ok http_status=405 result=empty before_runtime_fingerprint=3068595710:14935 after_runtime_fingerprint=3068595710:14935 before_config_fingerprint=3700515399:81321 after_config_fingerprint=3700515399:81321
+DIAG endpoint=/configs?force=true transport=ok http_status=405 result=empty before_runtime_fingerprint=3068595710:14935 after_runtime_fingerprint=3068595710:14935 before_config_fingerprint=3700515399:81321 after_config_fingerprint=3700515399:81321
+DIAG whole_config_update=applicable before_fingerprint=3700515399:81321 after_fingerprint=3700515399:81321
+DIAG remote-update-unavailable http_status=405 result=empty
+DIAG provider_update=not_applicable
+DIAG hypothesis=selection_persistence status=rejected
+DIAG hypothesis=probe_routing_mismatch status=unresolved
+DIAG hypothesis=runtime_config_reload status=unresolved
+DIAG hypothesis=whole_config_subscription status=unresolved
+DIAG hypothesis=proxy_provider_state status=unresolved
+DIAG hypothesis=shared_data_path status=unresolved
+DIAG restore requested_node=JP-X5-2 pre-restart_selection=JP-X5-2 post-restart_selection=JP-X5-2 result=empty
