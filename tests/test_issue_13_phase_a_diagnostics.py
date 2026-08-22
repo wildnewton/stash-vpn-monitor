@@ -545,8 +545,8 @@ def _restore_record(output: str) -> dict[str, str]:
         r"transport=(?P<transport>ok|failed) "
         r"http_status=(?P<http_status>\S+) "
         r"restart=(?P<restart>api-ready|api-unavailable) "
-        r"pre-restart_selection=(?P<pre-restart_selection>\S+) "
-        r"post-restart_selection=(?P<post-restart_selection>\S+)"
+        r"pre-restart_selection=(?P<pre_restart_selection>\S+) "
+        r"post-restart_selection=(?P<post_restart_selection>\S+)"
         r"(?: result=.*)?$"
     )
     match = pattern.fullmatch(line)
@@ -1021,8 +1021,8 @@ def test_live_diagnostic_reports_success_only_after_complete_exact_group_restora
         "transport": "ok",
         "http_status": "204",
         "restart": "api-ready",
-        "pre-restart_selection": "ORIGINAL-NODE",
-        "post-restart_selection": "ORIGINAL-NODE",
+        "pre_restart_selection": "ORIGINAL-NODE",
+        "post_restart_selection": "ORIGINAL-NODE",
     }
     restore_puts = [event for event in events if event.get("operation") == "restore"]
     assert [(event["group"], event["target"]) for event in restore_puts] == [
@@ -1046,7 +1046,7 @@ def test_live_diagnostic_reports_success_only_after_complete_exact_group_restora
         (
             "pre-restart-mismatch",
             {"restore_applies": False},
-            {"pre-restart_selection": "JP-DIAGNOSTIC"},
+            {"pre_restart_selection": "JP-DIAGNOSTIC"},
         ),
         (
             "restart-api-unavailable",
@@ -1059,7 +1059,7 @@ def test_live_diagnostic_reports_success_only_after_complete_exact_group_restora
                 "restore_restart_node": "LOST-AFTER-RESTORE",
                 "match_group_after_restore": "Drifted Group",
             },
-            {"post-restart_selection": "LOST-AFTER-RESTORE"},
+            {"post_restart_selection": "LOST-AFTER-RESTORE"},
         ),
     ],
 )

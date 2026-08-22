@@ -1153,14 +1153,13 @@ get_gui_selected_node() {
 diagnostic_select_candidate() {
     local original_node="${1:-}"
     local candidate_limit="${2:-10}"
-    local node delay tier score seen=0 fallback="" best="" tmpfile
+    local node delay tier score seen=0 best="" tmpfile
     tmpfile=$(mktemp)
     while IFS= read -r node; do
         [ -z "$node" ] && continue
         [ "$node" = "$original_node" ] && continue
         seen=$((seen + 1))
         [ "$seen" -gt "$candidate_limit" ] && break
-        [ -z "$fallback" ] && fallback="$node"
         delay=$(test_node_delay "$node")
         [ "$delay" -gt 0 ] 2>/dev/null || continue
         tier=$(node_priority_tier "$node")
@@ -1171,10 +1170,6 @@ diagnostic_select_candidate() {
     rm -f "$tmpfile"
     if [ -n "$best" ]; then
         echo "$best"
-    elif [ -n "$fallback" ]; then
-        echo "$fallback"
-    else
-        echo "$original_node"
     fi
 }
 
@@ -1208,7 +1203,7 @@ cmd_live_test() {
     local model routing_group original_node requested_node requested_delay
     model=$(diagnostic_active_config_model)
     routing_group=$(get_routing_group)
-    original_node=$(get_current_node)
+    original_node=$(diagnostic_group_selected_node "$routing_group")
     requested_node=$(diagnostic_select_candidate "$original_node" "$candidate_limit")
     requested_delay=0
 
@@ -1219,24 +1214,24 @@ cmd_live_test() {
     fi
     requested_delay=$(test_node_delay "$requested_node")
 
-    local encoded_group switch_result switch_status switch_body
+    local encoded_group switch_result switch_transport switch_status switch_body switch_valid=false
     encoded_group=$(urlencode "$routing_group")
     close_connections
-    switch_result=$(diagnostic_api_put "/proxies/$encoded_group" "$(jq -n --arg name "$requested_node" '{name: $name}')")
-    switch_status=${switch_result%%$'\t'*}
-    switch_body=${switch_result#*$'\t'}
+    switch_result=$(api_put_status "/proxies/$encoded_group" "$(jq -n --arg name "$requested_node" '{name: $name}')")
+    IFS=$'\t' read -r switch_transport switch_status switch_body <<< "$switch_result"
     close_connections
-    echo "DIAG requested_group=${routing_group} requested_node=${requested_node} delay_ms=${requested_delay} http_status=${switch_status} result=${switch_body}"
+    echo "DIAG requested_group=${routing_group} requested_node=${requested_node} delay_ms=${requested_delay} transport=${switch_transport} http_status=${switch_status} result=${switch_body}"
 
     local reproduction_correlation_valid=true
-    case "$switch_status" in
-        2??) ;;
-        *) reproduction_correlation_valid=false ;;
-    esac
+    if [ "$switch_transport" = "ok" ] && echo "$switch_status" | grep -Eq '^2[0-9][0-9]$'; then
+        switch_valid=true
+    else
+        reproduction_correlation_valid=false
+    fi
 
     local pre_restart_selection restart_status post_restart_selection gui_selection
-    pre_restart_selection=$(get_current_node)
-    echo "DIAG pre-restart selection=${pre_restart_selection:-empty} requested_node=${requested_node}"
+    pre_restart_selection=$(diagnostic_group_selected_node "$routing_group")
+    echo "DIAG pre-restart group=${routing_group} selection=${pre_restart_selection:-empty} requested_node=${requested_node}"
     if [ -z "$pre_restart_selection" ] || [ "$pre_restart_selection" != "$requested_node" ]; then
         reproduction_correlation_valid=false
     fi
@@ -1246,8 +1241,8 @@ cmd_live_test() {
     else
         restart_status="api-unavailable"
     fi
-    post_restart_selection=$(get_current_node)
-    echo "DIAG post-restart ${restart_status} selection=${post_restart_selection:-empty} requested_node=${requested_node}"
+    post_restart_selection=$(diagnostic_group_selected_node "$routing_group")
+    echo "DIAG post-restart ${restart_status} group=${routing_group} selection=${post_restart_selection:-empty} requested_node=${requested_node}"
     if [ "$restart_status" != "api-ready" ] || [ -z "$post_restart_selection" ] || [ "$post_restart_selection" != "$requested_node" ]; then
         reproduction_correlation_valid=false
     fi
@@ -1275,7 +1270,7 @@ cmd_live_test() {
     local attempt probe_time_selection http_code probe_failed=false probe_succeeded=false
     attempt=1
     while [ "$attempt" -le "$max_attempts" ]; do
-        probe_time_selection=$(get_current_node)
+        probe_time_selection=$(diagnostic_group_selected_node "$routing_group")
         probe_group_selection=$(diagnostic_group_selected_node "$probe_group")
         echo "DIAG probe-time attempt=${attempt} selection=${probe_time_selection:-empty} probe_group=${probe_group} probe_group_selection=${probe_group_selection:-empty}"
         echo "DIAG probe_group=${probe_group} switched_group=${routing_group} probe_time_selection=${probe_time_selection:-empty} probe_group_selection=${probe_group_selection:-empty}"
@@ -1364,15 +1359,13 @@ cmd_live_test() {
     fi
 
     local selection_status routing_status runtime_status whole_status provider_state_status shared_status
-    if [ -n "$pre_restart_selection" ] && [ "$post_restart_selection" = "$pre_restart_selection" ]; then
+    if ! $switch_valid || [ -z "$pre_restart_selection" ] || [ "$pre_restart_selection" != "$requested_node" ] || \
+       [ "$restart_status" != "api-ready" ] || [ -z "$post_restart_selection" ]; then
+        selection_status="unresolved"
+    elif [ "$post_restart_selection" = "$requested_node" ]; then
         selection_status="rejected"
     else
-        # Hypothesis classification with valid-evidence gates
-        if [ "$restart_status" != "api-ready" ] || [ -z "$post_restart_selection" ] || [ "$post_restart_selection" != "$requested_node" ]; then
-            selection_status="confirmed"
-        else
-            selection_status="rejected"
-        fi
+        selection_status="confirmed"
     fi
     # probe_routing_mismatch requires resolved probe_rule AND probe_group (not unknown/UNRESOLVED)
     if [ "$probe_rule" = "UNRESOLVED" ] || [ "$probe_group" = "unknown" ] || [ "$probe_group" = "UNRESOLVED" ]; then
@@ -1422,15 +1415,30 @@ cmd_live_test() {
     echo "DIAG hypothesis=proxy_provider_state status=${provider_state_status}"
     echo "DIAG hypothesis=shared_data_path status=${shared_status}"
 
-    # Best-effort restoration. Readback is logged because the operation under
-    # investigation may itself lose selection across restart.
+    # Restoration is part of the live-test safety contract. It is verified
+    # against the exact group switched at the start of the diagnostic.
     if [ -n "$original_node" ] && [ "$original_node" != "$requested_node" ]; then
-        local restore_result restore_pre restore_post
-        restore_result=$(diagnostic_api_put "/proxies/$encoded_group" "$(jq -n --arg name "$original_node" '{name: $name}')")
-        restore_pre=$(get_current_node)
-        restart_stash >/dev/null 2>&1 || true
-        restore_post=$(get_current_node)
-        echo "DIAG restore requested_node=${original_node} pre-restart_selection=${restore_pre:-empty} post-restart_selection=${restore_post:-empty} result=${restore_result#*$'\t'}"
+        local restore_result restore_transport restore_status restore_body restore_pre restore_post restore_restart restore_outcome
+        restore_result=$(api_put_status "/proxies/$encoded_group" "$(jq -n --arg name "$original_node" '{name: $name}')")
+        IFS=$'\t' read -r restore_transport restore_status restore_body <<< "$restore_result"
+        restore_pre=$(diagnostic_group_selected_node "$routing_group")
+        if restart_stash >/dev/null 2>&1; then
+            restore_restart="api-ready"
+        else
+            restore_restart="api-unavailable"
+        fi
+        restore_post=$(diagnostic_group_selected_node "$routing_group")
+
+        restore_outcome="failure"
+        if [ "$restore_transport" = "ok" ] && echo "$restore_status" | grep -Eq '^2[0-9][0-9]$' && \
+           [ "$restore_restart" = "api-ready" ] && [ "$restore_pre" = "$original_node" ] && \
+           [ "$restore_post" = "$original_node" ]; then
+            restore_outcome="success"
+        fi
+        echo "DIAG restore=${restore_outcome} requested_group=${routing_group} requested_node=${original_node} transport=${restore_transport} http_status=${restore_status} restart=${restore_restart} pre-restart_selection=${restore_pre:-empty} post-restart_selection=${restore_post:-empty} result=${restore_body}"
+        if [ "$restore_outcome" != "success" ]; then
+            return 1
+        fi
     fi
 
     return 0
