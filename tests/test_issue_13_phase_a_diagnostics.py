@@ -74,6 +74,11 @@ if parts.hostname == "www.gstatic.com":
         "status": status,
         "url": url,
     }
+    nodes_after_probe = [
+        item for item in os.environ.get("FAKE_NODES_AFTER_PROBE", "").split(",")
+    ]
+    if index < len(nodes_after_probe) and nodes_after_probe[index]:
+        state["selected"] = nodes_after_probe[index]
 else:
     event = {"kind": "api", "method": method, "endpoint": endpoint, "data": data}
     if method == "GET" and endpoint == "/configs":
@@ -81,7 +86,7 @@ else:
     elif method == "GET" and endpoint == "/rules":
         body = json.dumps({
             "rules": [
-                {"type": "DOMAIN", "payload": "www.gstatic.com", "proxy": "Probe Policy"},
+                {"type": "DOMAIN", "payload": "www.gstatic.com", "proxy": os.environ.get("FAKE_PROBE_GROUP", "Probe Policy")},
                 {"type": "MATCH", "proxy": "Default Proxy"},
             ]
         })
@@ -103,8 +108,9 @@ else:
     elif method == "GET" and endpoint == "/providers/proxies":
         body = json.dumps({"providers": {"airport": {"updatedAt": state["provider_generation"], "proxies": [{"name": "JP-DIAGNOSTIC"}]}}})
     elif method == "PUT" and endpoint.startswith("/proxies/"):
-        state["selected"] = json.loads(data)["name"]
-        status = 204
+        if os.environ.get("FAKE_SWITCH_APPLIES", "true") == "true":
+            state["selected"] = json.loads(data)["name"]
+        status = int(os.environ.get("FAKE_SWITCH_HTTP_STATUS", "204"))
         body = json.dumps({"result": "selected"})
     elif method == "PUT" and endpoint == "/configs":
         status = 202
@@ -201,6 +207,12 @@ def _diagnostic_run(
     config_model: str = "inline",
     probe_codes: str = "000,000,000,000,000,000,204",
     max_attempts: int = 2,
+    probe_group: str = "Probe Policy",
+    restart_node: str = "POST-RESTART-NODE",
+    switch_http_status: int = 204,
+    switch_applies: bool = True,
+    node_after_gui: str = "",
+    nodes_after_probe: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake_bin = tmp_path / "fake-bin"
@@ -248,13 +260,18 @@ def _diagnostic_run(
         restart_stash() {
             printf '%s\n' '{"kind":"restart","api_ready":true}' >> "$FAKE_STASH_EVENTS"
             local tmp="$FAKE_STASH_STATE.tmp"
-            jq --arg node "POST-RESTART-NODE" '.selected = $node' "$FAKE_STASH_STATE" > "$tmp"
+            jq --arg node "$TEST_RESTART_NODE" '.selected = $node' "$FAKE_STASH_STATE" > "$tmp"
             mv "$tmp" "$FAKE_STASH_STATE"
             return 0
         }
 
         get_gui_selected_node() {
             printf '%s\n' '{"kind":"gui_readback","node":"GUI-POST-RESTART-NODE"}' >> "$FAKE_STASH_EVENTS"
+            if [ -n "$TEST_NODE_AFTER_GUI" ]; then
+                local tmp="$FAKE_STASH_STATE.tmp"
+                jq --arg node "$TEST_NODE_AFTER_GUI" '.selected = $node' "$FAKE_STASH_STATE" > "$tmp"
+                mv "$tmp" "$FAKE_STASH_STATE"
+            fi
             echo "GUI-POST-RESTART-NODE"
         }
         get_gui_current_node() { get_gui_selected_node; }
@@ -271,9 +288,15 @@ def _diagnostic_run(
         "MONITOR_LIBRARY": str(monitor_library),
         "TEST_TMPDIR": str(tmp_path),
         "TEST_MAX_ATTEMPTS": str(max_attempts),
+        "TEST_RESTART_NODE": restart_node,
+        "TEST_NODE_AFTER_GUI": node_after_gui,
         "FAKE_STASH_STATE": str(state_path),
         "FAKE_STASH_EVENTS": str(events_path),
         "FAKE_PROBE_CODES": probe_codes,
+        "FAKE_PROBE_GROUP": probe_group,
+        "FAKE_SWITCH_HTTP_STATUS": str(switch_http_status),
+        "FAKE_SWITCH_APPLIES": "true" if switch_applies else "false",
+        "FAKE_NODES_AFTER_PROBE": ",".join(nodes_after_probe),
         "HTTP_URL": "http://www.gstatic.com/generate_204",
     })
     result = subprocess.run(
@@ -314,6 +337,28 @@ def _assert_fields_share_a_line(output: str, *fields: str) -> None:
     assert False, f"expected one diagnostic record containing {fields!r}\noutput:\n{output}"
 
 
+CURRENT_PROBE_ROUTE_PATTERN = re.compile(
+    r"^DIAG probe_rule=(?P<probe_rule>\S+) "
+    r"probe_payload=(?P<probe_payload>\S+) "
+    r"probe_group=(?P<probe_group>.*?) "
+    r"url=(?P<url>\S+)$"
+)
+
+
+def _current_probe_route_records(output: str) -> list[dict[str, str]]:
+    return [
+        match.groupdict()
+        for line in output.splitlines()
+        if (match := CURRENT_PROBE_ROUTE_PATTERN.fullmatch(line))
+    ]
+
+
+def _reproduction_status(output: str) -> str:
+    matches = re.findall(r"^DIAG reproduction=(confirmed|unresolved)\b", output, re.MULTILINE)
+    assert len(matches) == 1, f"expected exactly one structured reproduction record\n{output}"
+    return matches[0]
+
+
 def test_live_diagnostic_distinguishes_restart_and_every_probe_readback(tmp_path, monitor_library):
     result, events = _diagnostic_run(tmp_path, monitor_library)
     assert result.returncode == 0, result.stderr
@@ -334,23 +379,123 @@ def test_live_diagnostic_correlates_actual_probe_rule_group_and_probe_time_node(
     result, _ = _diagnostic_run(tmp_path, monitor_library)
     assert result.returncode == 0, result.stderr
 
-    _assert_fields_share_a_line(
-        result.stdout,
-        "probe_rule",
-        "DOMAIN",
-        "www.gstatic.com",
-        "probe_group",
-        "Probe Policy",
+    route_records = _current_probe_route_records(result.stdout)
+    assert route_records == [
+        {
+            "probe_rule": "DOMAIN",
+            "probe_payload": "www.gstatic.com",
+            "probe_group": "Probe Policy",
+            "url": "http://www.gstatic.com/generate_204",
+        }
+    ]
+
+    correlation_pattern = re.compile(
+        r"^DIAG probe_group=(?P<probe_group>.*?) "
+        r"switched_group=(?P<switched_group>.*?) "
+        r"probe_time_selection=(?P<probe_time_selection>\S+) "
+        r"probe_group_selection=(?P<probe_group_selection>\S+)$"
     )
-    _assert_fields_share_a_line(
-        result.stdout,
-        "probe_group",
-        "Probe Policy",
-        "switched_group",
-        "Default Proxy",
-        "probe_time_selection",
-        "POST-RESTART-NODE",
+    correlation_records = [
+        match.groupdict()
+        for line in result.stdout.splitlines()
+        if (match := correlation_pattern.fullmatch(line))
+    ]
+    assert correlation_records
+    assert all(record["probe_group"] == "Probe Policy" for record in correlation_records)
+    assert all(record["switched_group"] == "Default Proxy" for record in correlation_records)
+    assert all(record["probe_time_selection"] == "POST-RESTART-NODE" for record in correlation_records)
+
+
+def test_current_probe_route_parser_rejects_legacy_prefixed_evidence_fields():
+    legacy_only = (
+        "DIAG legacy_probe_rule=DOMAIN legacy_probe_payload=www.gstatic.com "
+        "legacy_probe_group=Probe Policy url=http://www.gstatic.com/generate_204\n"
     )
+    assert _current_probe_route_records(legacy_only) == []
+
+
+def test_reproduction_is_confirmed_only_when_every_correlation_gate_is_valid(tmp_path, monitor_library):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_codes="000,000,000",
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+    )
+    assert result.returncode == 0, result.stderr
+    _assert_fields_share_a_line(result.stdout, "requested_node", "JP-DIAGNOSTIC", "http_status", "204")
+    _assert_fields_share_a_line(result.stdout, "pre-restart", "selection", "JP-DIAGNOSTIC")
+    _assert_fields_share_a_line(result.stdout, "post-restart", "selection", "JP-DIAGNOSTIC")
+    diagnostic_probes = [event for event in events if event["kind"] == "http_probe"][:2]
+    assert [event["selected"] for event in diagnostic_probes] == ["JP-DIAGNOSTIC", "JP-DIAGNOSTIC"]
+    assert _reproduction_status(result.stdout) == "confirmed"
+
+
+@pytest.mark.parametrize(
+    ("case", "run_kwargs"),
+    [
+        (
+            "switch-http-failure",
+            {
+                "switch_http_status": 500,
+                "probe_group": "Default Proxy",
+                "restart_node": "JP-DIAGNOSTIC",
+            },
+        ),
+        (
+            "pre-restart-readback-mismatch",
+            {
+                "switch_applies": False,
+                "probe_group": "Default Proxy",
+                "restart_node": "JP-DIAGNOSTIC",
+            },
+        ),
+        (
+            "restart-node-loss",
+            {
+                "probe_group": "Default Proxy",
+                "restart_node": "POST-RESTART-NODE",
+            },
+        ),
+        (
+            "route-group-mismatch",
+            {
+                "probe_group": "Probe Policy",
+                "restart_node": "JP-DIAGNOSTIC",
+            },
+        ),
+        (
+            "earlier-probe-node-mismatch",
+            {
+                "probe_group": "Default Proxy",
+                "restart_node": "JP-DIAGNOSTIC",
+                "node_after_gui": "OTHER-NODE",
+                "nodes_after_probe": ("JP-DIAGNOSTIC", "JP-DIAGNOSTIC"),
+            },
+        ),
+    ],
+)
+def test_any_failed_reproduction_correlation_gate_is_unresolved(
+    tmp_path, monitor_library, case, run_kwargs
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_codes="000,000,000",
+        **run_kwargs,
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    assert _reproduction_status(result.stdout) == "unresolved", f"{case}\n{result.stdout}"
+
+    if case == "restart-node-loss":
+        _assert_fields_share_a_line(result.stdout, "post-restart", "selection", "POST-RESTART-NODE")
+    elif case == "route-group-mismatch":
+        route_records = _current_probe_route_records(result.stdout)
+        assert route_records[0]["probe_group"] == "Probe Policy"
+        assert "requested_group=Default Proxy" in result.stdout
+    elif case == "earlier-probe-node-mismatch":
+        diagnostic_probes = [event for event in events if event["kind"] == "http_probe"][:2]
+        assert [event["selected"] for event in diagnostic_probes] == ["OTHER-NODE", "JP-DIAGNOSTIC"]
 
 
 def test_live_diagnostic_compares_exact_config_reload_endpoints_and_evidence(tmp_path, monitor_library):
