@@ -4,17 +4,17 @@
 
 ## 概述
 
-自動監控 Stash VPN 連線，斷線時自動恢復：刷新 config → 切換節點 → 刷新訂閱 → 輪詢備選 config。也可手動切換節點或config等。
+自動監控 Stash VPN 連線，斷線時自動恢復：runtime reload attempt → 切換節點 → 檢查 remote update capability → 輪詢備選 config。也可手動切換節點或 config。
 
 ## 功能
 
-1. **連通性檢測** — Ping 8.8.8.8 + HTTP 通過代理雙重驗證（失敗後重試 5 次，間隔 3 秒，避免短暫波動誤觸發恢復流程）
+1. **連通性檢測** — 先證明 HTTP probe 的 runtime route 與 monitored group 相同，再透過代理驗證；Ping 僅作輔助資訊（validated failure 後重試 5 次，間隔 3 秒）
 2. **自動恢復鏈** — 7 步逐級升級：
-   - 刷新 config（reload + 測速重連當前節點）
+   - Runtime config reload attempt 與當前節點 reconnect/delay probe 分開記錄
    - 切換到最佳節點（JP/SG > TW > US > other non-HK > HK，單一排名通道）
    - 所有節點按 strict priority tier 排名，同 tier 內再按延遲排序；HK 永遠是最後 tier
-   - 強制刷新訂閱（重新從機場拉節點列表）
-   - 刷新後按統一政策重試節點
+   - Remote whole-config update 未有已驗證的 Stash API 時明確標為 unavailable，不猜測 endpoint
+   - Remote state 未更新時跳過相同節點集的重複輪詢
    - 輪詢所有備選 config，逐個嘗試節點切換
    - 全部失敗 → 通知手動處理
 3. **Config 切換** — 透過 macOS Accessibility API 自動點擊 Stash UI 切換 config
