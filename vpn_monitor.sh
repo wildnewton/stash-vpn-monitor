@@ -1113,7 +1113,14 @@ diagnostic_active_config_model() {
     grep -qE '^[[:space:]]*proxy-providers:[[:space:]]*$' "$STASH_CONFIG" 2>/dev/null && has_provider=true
     grep -qE '^[[:space:]]*use-url:[[:space:]]*' "$STASH_CONFIG" 2>/dev/null && has_use_url=true
 
-    if $has_subscribed && $has_provider; then
+    # Count how many distinct config sources are present
+    local source_count=0
+    $has_subscribed && source_count=$((source_count + 1))
+    $has_provider && source_count=$((source_count + 1))
+    $has_use_url && source_count=$((source_count + 1))
+
+    # If more than one source is present, it's a combination
+    if [ $source_count -gt 1 ]; then
         echo "combination"
     elif $has_subscribed; then
         echo "subscribed-whole-config"
