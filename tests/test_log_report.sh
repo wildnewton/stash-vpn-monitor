@@ -105,7 +105,10 @@ healthy_output="$(run_report 1h)"
 assert_contains "$healthy_output" "VPN Monitor Report — past 1h"
 assert_contains "$healthy_output" "Status: HEALTHY"
 assert_contains "$healthy_output" "Incidents: 0"
-assert_contains "$healthy_output" "Node switches: 0"
+assert_contains "$healthy_output" "Node switch attempts: 0"
+assert_contains "$healthy_output" "API-confirmed node switches: 0"
+assert_contains "$healthy_output" "Connectivity-verified node switches: 0"
+assert_contains "$healthy_output" "Post-switch connectivity failures: 0"
 assert_contains "$healthy_output" "Subscription refreshes: 0"
 assert_contains "$healthy_output" "Config switches: 0"
 assert_contains "$healthy_output" "No connectivity incidents detected."
@@ -115,8 +118,17 @@ if [ -e "$curl_sentinel" ]; then
     exit 1
 fi
 
+# Log retention reaching before the cutoff is not enough to claim HEALTHY when
+# there were no connectivity observations inside the requested period.
+write_log \
+    7200 "狀態: 正常（Ping + HTTP 均正常）"
+no_observation_output="$(run_report 1h)"
+assert_contains "$no_observation_output" "Status: NO DATA"
+assert_contains "$no_observation_output" "No connectivity observations in the requested period."
+assert_not_contains "$no_observation_output" "Status: HEALTHY"
+
 # Multiple retries/actions inside one failure->recovery sequence are one incident.
-# A node can be API-switched successfully yet still fail post-switch connectivity.
+# Candidate attempts, API-confirmed switches and connectivity verification are distinct.
 rm -f "$curl_sentinel"
 write_log \
     14400 "狀態: 全部檢測失敗 — 將重試 5 次再確認..." \
@@ -124,6 +136,7 @@ write_log \
     10800 "狀態: 正常（Ping + HTTP 均正常）" \
     6000 "狀態: 全部檢測失敗 — 將重試 5 次再確認..." \
     5940 "=== 開始恢復流程 ===" \
+    5910 "    警告: 節點切換失敗（目標: US-01），嘗試下一個" \
     5880 "    節點切換成功: SG-02 — 同步 GUI（重啟 Stash）" \
     5820 "    連通性驗證失敗 — SG-02 在 5 次重試後仍不可用，嘗試下一個候選" \
     5760 "    節點切換成功: JP-02 — 同步 GUI（重啟 Stash）" \
@@ -140,7 +153,10 @@ assert_contains "$incident_output" "Status: ATTENTION"
 assert_contains "$incident_output" "Incidents: 3"
 assert_contains "$incident_output" "Recovered: 2"
 assert_contains "$incident_output" "Unresolved: 1"
-assert_contains "$incident_output" "Node switches: 2"
+assert_contains "$incident_output" "Node switch attempts: 3"
+assert_contains "$incident_output" "API-confirmed node switches: 2"
+assert_contains "$incident_output" "Connectivity-verified node switches: 1"
+assert_contains "$incident_output" "Post-switch connectivity failures: 1"
 assert_contains "$incident_output" "Subscription refreshes: 1"
 assert_contains "$incident_output" "Config switches: 1"
 assert_contains "$incident_output" "Average recovery: 4m 0s"
@@ -168,6 +184,22 @@ assert_contains "$observed_recovery_output" "Incidents: 1"
 assert_contains "$observed_recovery_output" "Recovered: 1"
 assert_contains "$observed_recovery_output" "Unresolved: 0"
 assert_contains "$observed_recovery_output" "Average recovery: 10m 0s"
+
+# An incident that starts before the requested window but remains active into
+# the window must not disappear from the report.
+write_log \
+    4200 "狀態: 全部檢測失敗 — 將重試 5 次再確認..." \
+    4140 "=== 開始恢復流程 ===" \
+    1900 "    節點切換成功: JP-03 — 同步 GUI（重啟 Stash）" \
+    1800 "    成功切換到: JP-03 ✓" \
+    1800 "恢復成功（節點切換後）✓"
+overlap_output="$(run_report 1h)"
+assert_contains "$overlap_output" "Status: RECOVERED"
+assert_contains "$overlap_output" "Incidents: 1"
+assert_contains "$overlap_output" "Recovered: 1"
+assert_contains "$overlap_output" "Unresolved: 0"
+assert_contains "$overlap_output" "Average recovery: 40m 0s"
+assert_contains "$overlap_output" "Incident 1"
 
 # If the log itself starts after the requested cutoff, disclose partial coverage.
 write_log \
