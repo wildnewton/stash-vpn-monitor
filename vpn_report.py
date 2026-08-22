@@ -20,6 +20,8 @@ NODE_FAILED_RE = re.compile(
 )
 NODE_VERIFIED_RE = re.compile(r"成功切換到:\s*(.+)\s+✓\s*$")
 CONFIG_SWITCH_RE = re.compile(r"Config 切換成功:\s*(.+?)\s*$")
+NODE_SCAN_RE = re.compile(r"測試\s+(\d+)\s+個節點，\s*(\d+)\s+個可達")
+REFRESHED_NODE_COUNT_RE = re.compile(r"刷新後可用節點數:\s*(\d+)")
 
 
 @dataclass
@@ -114,8 +116,14 @@ def action_for(message):
     match = NODE_VERIFIED_RE.search(message)
     if match:
         return "connectivity verified: " + match.group(1).strip()
+    match = NODE_SCAN_RE.search(message)
+    if match:
+        return "candidate availability: %s/%s reachable" % (match.group(2), match.group(1))
     if "強制刷新訂閱" in message and message.lstrip().startswith(">>> Step"):
         return "subscription refresh"
+    match = REFRESHED_NODE_COUNT_RE.search(message)
+    if match:
+        return "subscription refreshed node count: " + match.group(1)
     match = CONFIG_SWITCH_RE.search(message)
     if match:
         return "config switch: " + match.group(1).strip()
@@ -144,6 +152,83 @@ def build_incidents(events):
             current.recovery_message = message
             current = None
     return incidents
+
+
+def incident_failure_type(incident):
+    if "HTTP 代理失敗" in incident.start_message:
+        return "http_proxy"
+    if "全部檢測失敗" in incident.start_message:
+        return "total"
+    return "unknown"
+
+
+def incident_entered_recovery_flow(incident):
+    return any(action == "recovery flow started" for _, action in incident.actions)
+
+
+def incident_recovery_depth(incident):
+    if not incident.recovered:
+        return "unresolved"
+
+    actions = [action for _, action in incident.actions]
+    message = incident.recovery_message or ""
+
+    if any(action.startswith("config switch: ") for action in actions):
+        return "alternate_config"
+    if "subscription refresh" in actions or "刷新訂閱" in message or "刷新 +" in message:
+        return "subscription_refresh"
+    if any(
+        action.startswith("node switch API ")
+        or action.startswith("connectivity failed after switch: ")
+        or action.startswith("connectivity verified: ")
+        for action in actions
+    ) or "節點切換" in message:
+        return "node_switch"
+    if "config 刷新後" in message:
+        return "config_refresh"
+    if "重試 #" in message and "已恢復" in message:
+        return "confirmation_retry"
+    if not incident_entered_recovery_flow(incident):
+        return "observed_recovery"
+    return "recovery_flow_unknown"
+
+
+def node_switch_candidate_attempts(incident):
+    return sum(
+        1
+        for _, action in incident.actions
+        if action.startswith("node switch API failed: ") or action.startswith("node switch API success: ")
+    )
+
+
+def has_verified_node_switch(incident):
+    return any(action.startswith("connectivity verified: ") for _, action in incident.actions)
+
+
+def severe_events_for_incident(incident, cutoff):
+    visible_actions = [(ts, action) for ts, action in incident.actions if ts >= cutoff]
+    severe = []
+    for index, (action_ts, action) in enumerate(visible_actions):
+        match = re.fullmatch(r"candidate availability: (\d+)/(\d+) reachable", action)
+        if not match:
+            continue
+        reachable = int(match.group(1))
+        total = int(match.group(2))
+        if total <= 0 or not (reachable == 0 or reachable * 10 <= total):
+            continue
+
+        refreshed_count = None
+        for _, later_action in visible_actions[index + 1 :]:
+            refreshed = re.fullmatch(r"subscription refreshed node count: (\d+)", later_action)
+            if refreshed:
+                refreshed_count = int(refreshed.group(1))
+                break
+
+        description = "%d/%d candidates reachable" % (reachable, total)
+        if refreshed_count is not None:
+            description += "; subscription refresh -> %d runtime nodes" % refreshed_count
+        severe.append((action_ts, description))
+    return severe
 
 
 def format_duration(seconds):
@@ -220,6 +305,21 @@ def report(log_file, period_text):
     else:
         status = "HEALTHY"
 
+    failure_types = Counter(incident_failure_type(incident) for incident in incidents)
+    recovery_depths = Counter(incident_recovery_depth(incident) for incident in incidents)
+
+    churn = Counter()
+    for incident in recovered:
+        if incident.start < cutoff or not has_verified_node_switch(incident):
+            continue
+        attempts = node_switch_candidate_attempts(incident)
+        if attempts > 0:
+            churn[attempts] += 1
+
+    severe_events = []
+    for incident in incidents:
+        severe_events.extend(severe_events_for_incident(incident, cutoff))
+
     print("VPN Monitor Report — past %s" % period_text)
     print("Period: %s → %s" % (short_time(cutoff), short_time(now)))
     print("Log coverage: %s" % coverage)
@@ -245,6 +345,16 @@ def report(log_file, period_text):
         print("Average recovery: %s" % format_duration(average))
         print("Longest recovery: %s" % format_duration(max(durations)))
 
+    recovery_flow_durations = [
+        incident.duration_seconds
+        for incident in recovered
+        if incident.duration_seconds is not None and incident_entered_recovery_flow(incident)
+    ]
+    if recovery_flow_durations:
+        flow_average = int(round(float(sum(recovery_flow_durations)) / len(recovery_flow_durations)))
+        print("Recovery-flow average: %s" % format_duration(flow_average))
+        print("Recovery-flow longest: %s" % format_duration(max(recovery_flow_durations)))
+
     if not incidents:
         print()
         if coverage == "NONE":
@@ -256,8 +366,59 @@ def report(log_file, period_text):
         return
 
     print()
-    print("Incidents")
-    for index, incident in enumerate(incidents, start=1):
+    print("Failure types")
+    print("  HTTP proxy failure with Ping healthy: %d" % failure_types["http_proxy"])
+    print("  Total connectivity failure: %d" % failure_types["total"])
+    if failure_types["unknown"]:
+        print("  Other/unknown: %d" % failure_types["unknown"])
+
+    print()
+    print("Recovery depth")
+    print("  Confirmation retry: %d" % recovery_depths["confirmation_retry"])
+    print("  Config refresh: %d" % recovery_depths["config_refresh"])
+    print("  Node switch: %d" % recovery_depths["node_switch"])
+    print("  Subscription refresh: %d" % recovery_depths["subscription_refresh"])
+    print("  Alternate config: %d" % recovery_depths["alternate_config"])
+    print("  Unresolved: %d" % recovery_depths["unresolved"])
+    if recovery_depths["observed_recovery"]:
+        print("  Observed recovery, method not logged: %d" % recovery_depths["observed_recovery"])
+    if recovery_depths["recovery_flow_unknown"]:
+        print("  Recovery flow, method not logged: %d" % recovery_depths["recovery_flow_unknown"])
+
+    if churn:
+        print()
+        print("Node-switch candidate churn")
+        for attempts in sorted(churn):
+            label = "candidate" if attempts == 1 else "candidates"
+            print("  %d %s: %d" % (attempts, label, churn[attempts]))
+
+    if problematic_nodes:
+        print()
+        print("Problematic nodes")
+        for node, count in problematic_nodes.most_common():
+            print("  %s — post-switch connectivity failures: %d" % (node, count))
+
+    if severe_events:
+        print()
+        print("Severe events")
+        for event_ts, description in severe_events:
+            print("  %s  %s" % (event_ts.strftime("%m-%d %H:%M:%S"), description))
+
+    significant = [
+        (index, incident)
+        for index, incident in enumerate(incidents, start=1)
+        if not incident.recovered
+        or incident_recovery_depth(incident) not in ("confirmation_retry", "observed_recovery")
+        or severe_events_for_incident(incident, cutoff)
+    ]
+
+    print()
+    print("Significant incidents / Timeline")
+    if not significant:
+        print("  None; routine transient recoveries are aggregated above.")
+        return
+
+    for index, incident in significant:
         boundary_note = "; started before period" if incident.start < cutoff else ""
         visible_actions = [(action_ts, action) for action_ts, action in incident.actions if action_ts >= cutoff]
         if incident.recovered:
@@ -274,27 +435,6 @@ def report(log_file, period_text):
             print("Incident %d: %s → unresolved%s" % (index, short_time(incident.start), boundary_note))
         if visible_actions:
             print("  " + " → ".join(action for _, action in visible_actions))
-
-    if problematic_nodes:
-        print()
-        print("Problematic nodes")
-        for node, count in problematic_nodes.most_common():
-            print("  %s — post-switch connectivity failures: %d" % (node, count))
-
-    print()
-    print("Timeline")
-    for incident in incidents:
-        if incident.start >= cutoff:
-            print("  %s  connectivity issue detected" % incident.start.strftime("%m-%d %H:%M:%S"))
-        else:
-            print("  %s  incident already in progress at period start" % cutoff.strftime("%m-%d %H:%M:%S"))
-        for action_ts, action in incident.actions:
-            if action_ts >= cutoff:
-                print("  %s  %s" % (action_ts.strftime("%m-%d %H:%M:%S"), action))
-        if incident.end is not None:
-            print("  %s  connectivity recovered" % incident.end.strftime("%m-%d %H:%M:%S"))
-        else:
-            print("  %s  no recovery observed by report time" % now.strftime("%m-%d %H:%M:%S"))
 
 
 def main(argv):
