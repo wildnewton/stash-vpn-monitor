@@ -1268,7 +1268,7 @@ cmd_live_test() {
     probe_payload="${probe_payload:-*}"
     probe_group="${probe_group:-unknown}"
     echo "DIAG probe_rule=${probe_rule} probe_payload=${probe_payload} probe_group=${probe_group} url=${HTTP_URL}"
-    if [ "$probe_group" != "$routing_group" ]; then
+    if [ "$probe_group" != "$routing_group" ] || [ "$probe_rule" = "UNRESOLVED" ]; then
         reproduction_correlation_valid=false
     fi
 
@@ -1355,7 +1355,7 @@ cmd_live_test() {
             sleep "$settle_seconds"
             provider_after=$(api_get /providers/proxies | diagnostic_text_fingerprint)
             echo "DIAG provider_update=${provider_name} http_status=${provider_status} result=${provider_body} before_fingerprint=${provider_before} after_fingerprint=${provider_after}"
-            if [ "$provider_before" != "$provider_after" ]; then
+            if [ "$provider_before" != "$provider_after" ] && [ "$provider_status" -ge 200 ] && [ "$provider_status" -lt 300 ] 2>/dev/null; then
                 provider_changed=true
             fi
             provider_before="$provider_after"
