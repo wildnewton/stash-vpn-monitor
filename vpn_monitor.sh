@@ -1256,6 +1256,7 @@ TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s?(.*)$")
 PERIOD_RE = re.compile(r"^([1-9]\d*)([hd])$")
 NODE_SWITCH_RE = re.compile(r"節點切換成功:\s*(.+?)\s*—")
+NODE_SWITCH_FAILURE_RE = re.compile(r"節點切換失敗（目標:\s*(.+?)）")
 NODE_FAILED_RE = re.compile(r"連通性驗證失敗\s*—\s*(.+?)\s+在\s+\d+\s+次重試後")
 NODE_VERIFIED_RE = re.compile(r"成功切換到:\s*(.+?)\s*✓")
 CONFIG_SWITCH_RE = re.compile(r"Config 切換成功:\s*(.+?)\s*$")
@@ -1330,6 +1331,10 @@ def is_healthy_observation(message):
     return message.startswith("狀態: 正常") or message.startswith("狀態: HTTP 正常")
 
 
+def is_connectivity_observation(message):
+    return is_incident_start(message) or is_healthy_observation(message)
+
+
 def explicit_recovery(message):
     return ("重試 #" in message and "已恢復 ✓" in message) or message.startswith("恢復成功（")
 
@@ -1337,6 +1342,9 @@ def explicit_recovery(message):
 def action_for(message):
     if message.strip() == "=== 開始恢復流程 ===":
         return "recovery flow started"
+    match = NODE_SWITCH_FAILURE_RE.search(message)
+    if match:
+        return "node switch API failed: " + match.group(1).strip()
     match = NODE_SWITCH_RE.search(message)
     if match:
         return "node switch API success: " + match.group(1).strip()
@@ -1351,10 +1359,6 @@ def action_for(message):
     match = CONFIG_SWITCH_RE.search(message)
     if match:
         return "config switch: " + match.group(1).strip()
-    if message.startswith("恢復成功（"):
-        return "recovered"
-    if "重試 #" in message and "已恢復 ✓" in message:
-        return "recovered during connectivity retry"
     if "恢復失敗" in message:
         return "recovery exhausted"
     return None
@@ -1399,7 +1403,8 @@ def report(log_file, period_text):
     now = parse_now()
     cutoff = now - delta
     all_events = read_events(log_file)
-    window_events = [event for event in all_events if cutoff <= event.ts <= now]
+    observed_events = [event for event in all_events if event.ts <= now]
+    window_events = [event for event in observed_events if event.ts >= cutoff]
 
     earliest = all_events[0].ts if all_events else None
     if earliest is None:
@@ -1409,30 +1414,48 @@ def report(log_file, period_text):
     else:
         coverage = "FULL"
 
-    incidents = build_incidents(window_events)
+    all_incidents = build_incidents(observed_events)
+    incidents = [
+        incident
+        for incident in all_incidents
+        if incident.start <= now and (incident.end is None or incident.end >= cutoff)
+    ]
     recovered = [incident for incident in incidents if incident.recovered]
     unresolved = [incident for incident in incidents if not incident.recovered]
+    has_window_observation = any(is_connectivity_observation(event.message) for event in window_events)
 
-    node_switches = 0
+    node_switch_attempts = 0
+    api_confirmed_switches = 0
+    connectivity_verified_switches = 0
+    post_switch_failures = 0
     subscription_refreshes = 0
     config_switches = 0
     problematic_nodes = Counter()
     for event in window_events:
-        if NODE_SWITCH_RE.search(event.message):
-            node_switches += 1
+        api_success = NODE_SWITCH_RE.search(event.message)
+        api_failure = NODE_SWITCH_FAILURE_RE.search(event.message)
+        verified = NODE_VERIFIED_RE.search(event.message)
+        failed = NODE_FAILED_RE.search(event.message)
+        if api_success:
+            node_switch_attempts += 1
+            api_confirmed_switches += 1
+        elif api_failure:
+            node_switch_attempts += 1
+        if verified:
+            connectivity_verified_switches += 1
+        if failed:
+            post_switch_failures += 1
+            problematic_nodes[failed.group(1).strip()] += 1
         if "強制刷新訂閱" in event.message and event.message.lstrip().startswith(">>> Step"):
             subscription_refreshes += 1
         if CONFIG_SWITCH_RE.search(event.message):
             config_switches += 1
-        failed = NODE_FAILED_RE.search(event.message)
-        if failed:
-            problematic_nodes[failed.group(1).strip()] += 1
 
     if unresolved:
         status = "ATTENTION"
     elif incidents:
         status = "RECOVERED"
-    elif coverage == "NONE":
+    elif not has_window_observation:
         status = "NO DATA"
     else:
         status = "HEALTHY"
@@ -1449,7 +1472,10 @@ def report(log_file, period_text):
     print("Incidents: %d" % len(incidents))
     print("Recovered: %d" % len(recovered))
     print("Unresolved: %d" % len(unresolved))
-    print("Node switches: %d" % node_switches)
+    print("Node switch attempts: %d" % node_switch_attempts)
+    print("API-confirmed node switches: %d" % api_confirmed_switches)
+    print("Connectivity-verified node switches: %d" % connectivity_verified_switches)
+    print("Post-switch connectivity failures: %d" % post_switch_failures)
     print("Subscription refreshes: %d" % subscription_refreshes)
     print("Config switches: %d" % config_switches)
 
@@ -1463,6 +1489,8 @@ def report(log_file, period_text):
         print()
         if coverage == "NONE":
             print("No timestamped log data available for this report.")
+        elif not has_window_observation:
+            print("No connectivity observations in the requested period.")
         else:
             print("No connectivity incidents detected.")
         return
@@ -1470,17 +1498,19 @@ def report(log_file, period_text):
     print()
     print("Incidents")
     for index, incident in enumerate(incidents, start=1):
+        boundary_note = "; started before period" if incident.start < cutoff else ""
         if incident.recovered:
             print(
-                "Incident %d: %s → %s (%s, recovered)" % (
+                "Incident %d: %s → %s (%s, recovered%s)" % (
                     index,
                     short_time(incident.start),
                     short_time(incident.end),
                     format_duration(incident.duration_seconds or 0),
+                    boundary_note,
                 )
             )
         else:
-            print("Incident %d: %s → unresolved" % (index, short_time(incident.start)))
+            print("Incident %d: %s → unresolved%s" % (index, short_time(incident.start), boundary_note))
         if incident.actions:
             print("  " + " → ".join(action for _, action in incident.actions))
 
@@ -1786,7 +1816,7 @@ cmd_change_config() {
         auto_current=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --status 2>/dev/null | sed 's/^Current config: //')
         echo "當前 config: ${auto_current:-unknown}"
 
-        # 動態取得所有可用 config 並排除當前
+        # 取得所有可用 config 並排除當前
         local all_configs
         local -a alternatives
         all_configs=$("$PYTHON_BIN" "$CONFIG_SWITCHER" --list 2>/dev/null)
