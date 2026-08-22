@@ -24,6 +24,7 @@ jobs:
           bash -n tests/test_cli_missing_optional_args.sh
           bash -n tests/test_ci_workflow.sh
           bash -n tests/test_node_ranking_policy.sh
+          bash -n tests/test_log_report.sh
 
       - name: Python syntax check
         run: |
@@ -35,3 +36,4 @@ jobs:
           bash tests/test_cli_missing_optional_args.sh
           bash tests/test_ci_workflow.sh
           bash tests/test_node_ranking_policy.sh
+          bash tests/test_log_report.sh
