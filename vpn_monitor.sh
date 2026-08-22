@@ -339,9 +339,12 @@ get_selectable_nodes() {
 }
 
 # 切換到指定節點（帶重試，解決重啟後 API 不穩定問題）
+# 設置全局變數 LAST_SWITCHED_GROUP 為實際切換的 group，失敗返回 1
+LAST_SWITCHED_GROUP=""
 switch_node() {
     local target="$1"
     local max_retries="${2:-$RETRY_MAX}"
+    LAST_SWITCHED_GROUP=""
 
     local i
     for i in $(seq 1 "$max_retries"); do
@@ -362,6 +365,7 @@ switch_node() {
         if [ "$current" = "$target" ]; then
             log "    節點切換成功: ${target} — 同步 GUI（重啟 Stash）"
             restart_stash
+            LAST_SWITCHED_GROUP="$group"
             return 0
         fi
 
@@ -560,19 +564,21 @@ switch_to_best_node() {
         [ -z "$node" ] && continue
 
         # 執行切換（switch_node 內部含重試 + 節點名驗證）
+        # switch_node 設置全局變數 LAST_SWITCHED_GROUP
         if ! switch_node "$node" $RETRY_MAX; then
             log "    警告: 節點切換失敗（目標: ${node}），嘗試下一個"
             continue
         fi
+        local switched_group="$LAST_SWITCHED_GROUP"
         switched="$node"
-        log "    節點切換確認: ${node} ✓"
+        log "    節點切換確認: ${node} ✓ (group: ${switched_group})"
 
-        # 切換成功後驗證連通性（correlation 有效時最多重試 RETRY_MAX 次）
+        # 切換成功後驗證連通性（使用實際切換的 group，而非重新計算）
         # 用 temp file 避免 $(...) 子殼層導致的全域計數器遺失
         local conn_retry=0
         while [ $conn_retry -lt $RETRY_MAX ]; do
             sleep $RETRY_INTERVAL
-            check_connectivity "post-switch" "" "$node" > "$_conn_tmp"
+            check_connectivity "post-switch" "$switched_group" "$node" > "$_conn_tmp"
             cstatus=$(cat "$_conn_tmp")
             if is_measurement_unresolved "$cstatus"; then
                 log "    measurement-unresolved — probe route/node correlation 無法成立，停止自動恢復"
