@@ -728,7 +728,7 @@ recover() {
 
     log "當前 config 所有節點皆失敗，嘗試強制刷新訂閱..."
 
-    # Step 4: 強制刷新訂閱（從機場重新拉節點列表，內部已含 sleep 15）
+    # Step 4: 強制刷新訂閱（從機場重新拉節點，內部已含 sleep 15）
     refresh_subscription
 
     # 刷新後先檢查連通性（訂閱刷新可能直接解決問題）
@@ -1303,20 +1303,20 @@ def parse_now():
 
 
 def read_events(log_file):
-    path = Path(log_file)
-    if not path.is_file():
-        return []
     events = []
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for raw in handle:
-            match = LINE_RE.match(raw.rstrip("\n"))
-            if not match:
-                continue
-            try:
-                ts = datetime.strptime(match.group(1), TS_FORMAT)
-            except ValueError:
-                continue
-            events.append(Event(ts=ts, message=match.group(2)))
+    for path in (Path(log_file + ".old"), Path(log_file)):
+        if not path.is_file():
+            continue
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                match = LINE_RE.match(raw.rstrip("\n"))
+                if not match:
+                    continue
+                try:
+                    ts = datetime.strptime(match.group(1), TS_FORMAT)
+                except ValueError:
+                    continue
+                events.append(Event(ts=ts, message=match.group(2)))
     events.sort(key=lambda event: event.ts)
     return events
 
