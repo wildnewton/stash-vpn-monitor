@@ -387,13 +387,22 @@ def test_restart_group_change_is_terminal_unresolved_against_the_exact_switched_
                 "/proxies/New Group") jq -n --arg node "$(cat "$new_node")" '{now:$node}' ;;
             esac
         }
-        api_put() {
+        api_put_status() {
             local node
             node=$(echo "$2" | jq -r .name)
             echo "SWITCH:$1:$node" >> "$events"
             case "$1" in
                 "/proxies/Old Group") echo "$node" > "$old_node" ;;
                 "/proxies/New Group") echo "$node" > "$new_node" ;;
+            esac
+            printf 'ok\t204\tselected\n'
+        }
+        api_put() { echo "LEGACY-PUT:$1" >> "$events"; return 1; }
+        get_group_selected_node() {
+            echo "EXACT-READ:$1" >> "$events"
+            case "$1" in
+                "Old Group") cat "$old_node" ;;
+                "New Group") cat "$new_node" ;;
             esac
         }
         restart_stash() {
@@ -429,6 +438,7 @@ def test_restart_group_change_is_terminal_unresolved_against_the_exact_switched_
     assert "ALTERNATE-CONFIG" not in output
     assert "REMOTE-UPDATE" not in output
     assert "NOTIFY:" not in output
+    assert "LEGACY-PUT:" not in output
     assert "measurement-unresolved" in output
     assert "次重試後仍不可用" not in output
     assert "成功切換到" not in output
@@ -465,11 +475,17 @@ def test_actual_switched_group_keeps_full_retry_window_while_correlation_remains
                 "/proxies/Old Group") jq -n --arg node "$(cat "$selected")" '{now:$node}' ;;
             esac
         }
-        api_put() {
+        api_put_status() {
             local node
             node=$(echo "$2" | jq -r .name)
             echo "$node" > "$selected"
             echo "SWITCH:$node" >> "$events"
+            printf 'ok\t204\tselected\n'
+        }
+        api_put() { echo "LEGACY-PUT:$1" >> "$events"; return 1; }
+        get_group_selected_node() {
+            echo "EXACT-READ:$1:$(cat "$selected")" >> "$events"
+            cat "$selected"
         }
         restart_stash() { echo RESTART-GROUP-STILL-OLD >> "$events"; return 0; }
         ping() { return 0; }
@@ -496,6 +512,7 @@ def test_actual_switched_group_keeps_full_retry_window_while_correlation_remains
     assert output.count("SWITCH:TW-CANDIDATE-D") == 1
     assert output.count("HTTP:TW-CANDIDATE-D") == 1
     assert output.count("NOTIFY:") == 1
+    assert "LEGACY-PUT:" not in output
 
 
 def test_monitor_exposes_measurement_unresolved_without_starting_recovery(tmp_path, monitor_library):
@@ -752,11 +769,17 @@ def test_existing_switch_readback_and_gui_restart_synchronization_remain_pinned(
         close_connections() { :; }
         get_routing_group() { echo "Default Proxy"; }
         urlencode() { echo "$1"; }
-        api_put() {
-            echo "PUT:$1" >> "$events"
+        api_put_status() {
+            echo "PUT-STATUS:$1:ok:204" >> "$events"
             echo "$2" | jq -r .name > "$selected"
+            printf 'ok\t204\tselected\n'
         }
-        get_current_node() { cat "$selected"; }
+        api_put() { echo "LEGACY-PUT:$1" >> "$events"; return 1; }
+        get_current_node() { echo LEGACY-READBACK >> "$events"; cat "$selected"; }
+        get_group_selected_node() {
+            echo "EXACT-READ:$1:$(cat "$selected")" >> "$events"
+            cat "$selected"
+        }
         restart_stash() { echo GUI_RESTART >> "$events"; return 0; }
 
         switch_node "JP-TARGET" 1
@@ -768,6 +791,9 @@ def test_existing_switch_readback_and_gui_restart_synchronization_remain_pinned(
     assert result.returncode == 0, result.stderr
     assert "RC=0 NODE=JP-TARGET" in result.stdout
     assert "GUI_RESTART" in result.stdout
+    assert "PUT-STATUS:/proxies/Default Proxy:ok:204" in result.stdout
+    assert result.stdout.count("EXACT-READ:Default Proxy:JP-TARGET") == 2
+    assert "LEGACY-PUT:" not in result.stdout
 
 
 def test_existing_config_switch_still_requires_restart_and_api_readback(tmp_path, monitor_library):
