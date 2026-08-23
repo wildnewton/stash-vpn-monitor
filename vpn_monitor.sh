@@ -68,7 +68,7 @@ STASH_CONFIG="$STASH_CONFIG_DIR/config.yaml"
 
 # 日誌
 LOG_FILE="${LOG_FILE:-$HOME/Library/Logs/vpn_monitor.log}"
-MAX_LOG_LINES=5000
+LOG_RETENTION_DAYS=30
 
 # 連通性檢測
 PING_TARGET="8.8.8.8"
@@ -609,16 +609,48 @@ try_alternative_configs() {
     return 1
 }
 
-# 日誌輪替
-rotate_log() {
-    if [ -f "$LOG_FILE" ]; then
-        local lines
-        lines=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-        if [ "$lines" -gt "$MAX_LOG_LINES" ] 2>/dev/null; then
-            mv "$LOG_FILE" "${LOG_FILE}.old" 2>/dev/null || true
-            log "日誌已輪替"
-        fi
+# 今日日期（可被測試以 VPN_LOG_DATE_OVERRIDE 覆蓋）
+today_str() {
+    [ -n "${VPN_LOG_DATE_OVERRIDE:-}" ] && echo "${VPN_LOG_DATE_OVERRIDE}" || date '+%Y-%m-%d'
+}
+
+# 保留窗口起算日（today - LOG_RETENTION_DAYS），GNU/BSD date 雙平台可移植
+log_retention_cutoff() {
+    local today; today="$(today_str)"
+    if date -v "-${LOG_RETENTION_DAYS}d" "+%Y-%m-%d" >/dev/null 2>&1; then
+        # BSD date (macOS)
+        date -v "-${LOG_RETENTION_DAYS}d" -j -f '%Y-%m-%d' "$today" '+%Y-%m-%d' 2>/dev/null || echo 0000-00-00
+    else
+        # GNU date (Linux/CI)
+        date -d "${today} - ${LOG_RETENTION_DAYS} days" '+%Y-%m-%d' 2>/dev/null || echo 0000-00-00
     fi
+}
+
+# 日誌輪替：按首行日期歸檔為 vpn_monitor.log.YYYY-MM-DD（基於時間，非行數）
+rotate_log() {
+    [ -f "$LOG_FILE" ] || return 0
+    local first_line first_date
+    first_line="$(head -n 1 "$LOG_FILE" 2>/dev/null || true)"
+    first_date="$(printf '%s\n' "$first_line" | sed -n 's/^\[\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\) .*/\1/p')"
+    [ -n "$first_date" ] || return 0
+    if [ "$first_date" != "$(today_str)" ]; then
+        mv "$LOG_FILE" "${LOG_FILE}.${first_date}" 2>/dev/null || true
+        log "日誌已輪替至 ${LOG_FILE}.${first_date}"
+    fi
+    prune_old_logs
+}
+
+# 清理超過保留期的 dated 日誌；不動 legacy .old 或其他後綴
+prune_old_logs() {
+    local dir base cutoff f d
+    dir="$(dirname "$LOG_FILE")"
+    base="$(basename "$LOG_FILE")"
+    cutoff="$(log_retention_cutoff)"
+    for f in "$dir"/"$base".????-??-??; do
+        [ -e "$f" ] || continue
+        d="${f#"$dir"/"$base".}"          # 提取 YYYY-MM-DD
+        [ "$d" \< "$cutoff" ] && rm -f "$f" 2>/dev/null || true
+    done
 }
 
 # ===================== 輔助函數 =====================
@@ -1774,6 +1806,11 @@ cmd_uninstall() {
         if [ -f "${LOG_FILE}.old" ]; then
             echo "      ${LOG_FILE}.old"
         fi
+        # 列出保留的 dated 歸檔
+        for f in "$LOG_FILE".????-??-??; do
+            [ -e "$f" ] || continue
+            echo "      $f"
+        done
     else
         if [ -f "$LOG_FILE" ]; then
             rm -f "$LOG_FILE"
@@ -1783,6 +1820,11 @@ cmd_uninstall() {
             rm -f "${LOG_FILE}.old"
             echo "    ✓ 已刪除: ${LOG_FILE}.old"
         fi
+        for f in "$LOG_FILE".????-??-??; do
+            [ -e "$f" ] || continue
+            rm -f "$f"
+            echo "    ✓ 已刪除: $f"
+        done
     fi
 
     echo ""

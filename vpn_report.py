@@ -64,9 +64,34 @@ def parse_now():
     return datetime.now().replace(microsecond=0)
 
 
+# Strict calendar-date match so malformed suffixes like "2026-13-99" or
+# "2026-99-99" are never mistaken for rotated log files.
+_DATED_RE = re.compile(r"^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$")
+
+
+def _log_file_candidates(log_file):
+    """Enumerate every retained log file, oldest first.
+
+    Includes the active log, the legacy single-backup ``.old`` (kept for
+    backward compatibility with pre-rotation installs), and all time-based
+    rotated files named ``<log>.YYYY-MM-DD``.
+    """
+    base = Path(log_file)
+    parent, name = base.parent, base.name
+    candidates = [base]
+    legacy_old = parent / (name + ".old")
+    if legacy_old.is_file():
+        candidates.append(legacy_old)
+    for path in sorted(parent.glob("%s.*" % name)):
+        suffix = path.name[len(name) + 1:]
+        if _DATED_RE.match(suffix):
+            candidates.append(path)
+    return candidates
+
+
 def read_events(log_file):
     events = []
-    for path in (Path(log_file + ".old"), Path(log_file)):
+    for path in _log_file_candidates(log_file):
         if not path.is_file():
             continue
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -363,7 +388,7 @@ def report(log_file, period_text):
             print("No connectivity observations in the requested period.")
         else:
             print("No connectivity incidents detected.")
-        return
+        return {"coverage": coverage, "earliest": earliest}
 
     print()
     print("Failure types")
@@ -416,7 +441,7 @@ def report(log_file, period_text):
     print("Significant incidents / Timeline")
     if not significant:
         print("  None; routine transient recoveries are aggregated above.")
-        return
+        return {"coverage": coverage, "earliest": earliest}
 
     for index, incident in significant:
         boundary_note = "; started before period" if incident.start < cutoff else ""
@@ -435,6 +460,8 @@ def report(log_file, period_text):
             print("Incident %d: %s → unresolved%s" % (index, short_time(incident.start), boundary_note))
         if visible_actions:
             print("  " + " → ".join(action for _, action in visible_actions))
+
+    return {"coverage": coverage, "earliest": earliest}
 
 
 def main(argv):
