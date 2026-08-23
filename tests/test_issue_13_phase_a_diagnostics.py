@@ -97,16 +97,21 @@ else:
             ]
         })
     elif method == "GET" and endpoint == "/proxies":
-        selectable = [
+        group_options = [
             item for item in os.environ.get(
-                "FAKE_SELECTABLE_NODES", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
+                "FAKE_GROUP_OPTIONS", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
+            ).split(",") if item
+        ]
+        real_nodes = [
+            item for item in os.environ.get(
+                "FAKE_REAL_PROXY_NODES", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
             ).split(",") if item
         ]
         proxies = {
-            group: {"type": "Selector", "now": selected, "all": selectable}
+            group: {"type": "Selector", "now": selected, "all": group_options}
             for group, selected in state["group_selected"].items()
         }
-        for node in sorted(set(selectable) | set(state["group_selected"].values())):
+        for node in sorted(set(real_nodes) | set(state["group_selected"].values())):
             if node:
                 proxies[node] = {"type": "VLESS"}
         body = json.dumps({"proxies": proxies})
@@ -125,14 +130,22 @@ else:
             if read_index < len(readbacks):
                 selected = "" if readbacks[read_index] == "__EMPTY__" else readbacks[read_index]
                 state["group_read_index"] = read_index + 1
-        selectable = [
+        group_options = [
             item for item in os.environ.get(
-                "FAKE_SELECTABLE_NODES", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
+                "FAKE_GROUP_OPTIONS", "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST"
             ).split(",") if item
         ]
-        body = json.dumps({"type": "Selector", "now": selected, "all": selectable})
+        body = json.dumps({"type": "Selector", "now": selected, "all": group_options})
     elif method == "GET" and endpoint == "/providers/proxies":
-        body = json.dumps({"providers": {"airport": {"updatedAt": state["provider_generation"], "proxies": [{"name": "JP-DIAGNOSTIC"}]}}})
+        provider_operations = json.loads(os.environ.get("FAKE_PROVIDER_OPERATIONS", "{}"))
+        provider_names = list(provider_operations) or ["airport"]
+        body = json.dumps({"providers": {
+            name: {
+                "updatedAt": state["provider_generations"].get(name, 0),
+                "proxies": [{"name": "JP-DIAGNOSTIC"}],
+            }
+            for name in provider_names
+        }})
     elif method == "PUT" and endpoint.startswith("/proxies/"):
         put_index = state.get("proxy_put_index", 0)
         operation = "switch" if put_index == 0 else "restore"
@@ -171,12 +184,21 @@ else:
             config_path = Path(os.environ["FAKE_STASH_CONFIG"])
             config_path.write_text(config_path.read_text() + "# refreshed\n")
         body = json.dumps({"result": "accepted", "forced": True})
-    elif method == "PUT" and endpoint == "/providers/proxies/airport":
-        if os.environ.get("FAKE_PROVIDER_CHANGES_FINGERPRINT", "true") == "true":
-            state["provider_generation"] += 1
-        status = int(os.environ.get("FAKE_PROVIDER_HTTP_STATUS", "204"))
-        transport_rc = int(os.environ.get("FAKE_PROVIDER_TRANSPORT_RC", "0"))
-        body = os.environ.get("FAKE_PROVIDER_BODY", "provider-updated")
+    elif method == "PUT" and endpoint.startswith("/providers/proxies/"):
+        provider_name = endpoint.removeprefix("/providers/proxies/")
+        provider_operations = json.loads(os.environ.get("FAKE_PROVIDER_OPERATIONS", "{}"))
+        operation = provider_operations.get(provider_name, {})
+        changes_fingerprint = operation.get(
+            "changes_fingerprint",
+            os.environ.get("FAKE_PROVIDER_CHANGES_FINGERPRINT", "true") == "true",
+        )
+        if changes_fingerprint:
+            state["provider_generations"][provider_name] = (
+                state["provider_generations"].get(provider_name, 0) + 1
+            )
+        status = int(operation.get("http_status", os.environ.get("FAKE_PROVIDER_HTTP_STATUS", "204")))
+        transport_rc = int(operation.get("transport_rc", os.environ.get("FAKE_PROVIDER_TRANSPORT_RC", "0")))
+        body = operation.get("body", os.environ.get("FAKE_PROVIDER_BODY", "provider-updated"))
     elif method == "DELETE" and endpoint == "/connections":
         status = 204
 
@@ -275,6 +297,8 @@ def _diagnostic_run(
     match_group_after_restart: str = "Default Proxy",
     match_group_after_restore: str = "Default Proxy",
     selectable_nodes: tuple[str, ...] = ("JP-DIAGNOSTIC", "TW-BACKUP", "HK-LAST"),
+    group_options=None,
+    real_proxy_nodes=None,
     node_delays=None,
     group_readbacks: tuple[str, ...] = (),
     node_after_gui: str = "",
@@ -289,6 +313,7 @@ def _diagnostic_run(
     provider_transport_rc: int = 0,
     provider_changes_fingerprint: bool = True,
     provider_body: str = "provider-updated",
+    provider_operations=None,
     probe_rule_type: str = "DOMAIN",
     probe_rule_payload: str = "www.gstatic.com",
     diagnostic_probe_route: str = "",
@@ -312,7 +337,7 @@ def _diagnostic_run(
         "proxy_put_index": 0,
         "group_read_index": 0,
         "runtime_generation": 0,
-        "provider_generation": 0,
+        "provider_generations": {"airport": 0},
         "probe_index": 0,
     }))
     events_path = tmp_path / "events.jsonl"
@@ -416,7 +441,12 @@ def _diagnostic_run(
         "FAKE_RESTORE_HTTP_STATUS": str(restore_http_status),
         "FAKE_RESTORE_TRANSPORT_RC": str(restore_transport_rc),
         "FAKE_RESTORE_APPLIES": "true" if restore_applies else "false",
-        "FAKE_SELECTABLE_NODES": ",".join(selectable_nodes),
+        "FAKE_GROUP_OPTIONS": ",".join(
+            selectable_nodes if group_options is None else group_options
+        ),
+        "FAKE_REAL_PROXY_NODES": ",".join(
+            selectable_nodes if real_proxy_nodes is None else real_proxy_nodes
+        ),
         "FAKE_NODE_DELAYS": json.dumps(node_delays or {}),
         "FAKE_GROUP_READBACKS": ",".join(group_readbacks),
         "FAKE_NODES_AFTER_PROBE": ",".join(nodes_after_probe),
@@ -430,6 +460,7 @@ def _diagnostic_run(
         "FAKE_PROVIDER_TRANSPORT_RC": str(provider_transport_rc),
         "FAKE_PROVIDER_CHANGES_FINGERPRINT": "true" if provider_changes_fingerprint else "false",
         "FAKE_PROVIDER_BODY": provider_body,
+        "FAKE_PROVIDER_OPERATIONS": json.dumps(provider_operations or {}),
         "FAKE_STASH_CONFIG": str(stash_dir / "config.yaml"),
         "FAKE_PROBE_RULE_TYPE": probe_rule_type,
         "FAKE_PROBE_RULE_PAYLOAD": probe_rule_payload,
@@ -532,6 +563,22 @@ def _provider_update_record(output: str) -> dict[str, str]:
     assert body, f"missing structured response body evidence\n{line}"
     record["result"] = body.group(1)
     return record
+
+
+def _provider_update_records(output: str) -> list[dict[str, str]]:
+    pattern = re.compile(
+        r"^DIAG provider_update=(?P<provider_update>\S+) "
+        r"transport=(?P<transport>ok|failed) "
+        r"http_status=(?P<http_status>\S+) "
+        r"result=(?P<result>.*?) "
+        r"before_fingerprint=(?P<before_fingerprint>\S+) "
+        r"after_fingerprint=(?P<after_fingerprint>\S+)$"
+    )
+    return [
+        match.groupdict()
+        for line in output.splitlines()
+        if (match := pattern.fullmatch(line))
+    ]
 
 
 def _restore_record(output: str) -> dict[str, str]:
@@ -971,6 +1018,103 @@ def test_provider_hypothesis_and_record_require_operation_specific_transport_evi
     assert record["before_fingerprint"] != record["after_fingerprint"]
 
 
+@pytest.mark.parametrize(
+    "provider_operations",
+    [
+        {
+            "a-failed-changing": {
+                "changes_fingerprint": True,
+                "transport_rc": 7,
+                "http_status": 204,
+                "body": "failed-changing",
+            },
+            "b-success-unchanged": {
+                "changes_fingerprint": False,
+                "transport_rc": 0,
+                "http_status": 204,
+                "body": "success-unchanged",
+            },
+        },
+        {
+            "a-success-unchanged": {
+                "changes_fingerprint": False,
+                "transport_rc": 0,
+                "http_status": 204,
+                "body": "success-unchanged",
+            },
+            "b-failed-changing": {
+                "changes_fingerprint": True,
+                "transport_rc": 7,
+                "http_status": 204,
+                "body": "failed-changing",
+            },
+        },
+        {
+            "a-http-failed-changing": {
+                "changes_fingerprint": True,
+                "transport_rc": 0,
+                "http_status": 500,
+                "body": "http-failed-changing",
+            },
+            "b-success-unchanged": {
+                "changes_fingerprint": False,
+                "transport_rc": 0,
+                "http_status": 204,
+                "body": "success-unchanged",
+            },
+        },
+    ],
+)
+def test_multi_provider_evidence_cannot_be_combined_across_update_operations(
+    tmp_path, monitor_library, provider_operations
+):
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        config_model="proxy_provider",
+        provider_operations=provider_operations,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _hypothesis_status(result.stdout, "proxy_provider_state") == "unresolved"
+
+    records = _provider_update_records(result.stdout)
+    assert [record["provider_update"] for record in records] == list(provider_operations)
+    for record in records:
+        operation = provider_operations[record["provider_update"]]
+        assert record["transport"] == ("ok" if operation["transport_rc"] == 0 else "failed")
+        assert record["http_status"] == str(operation["http_status"])
+        assert record["result"] == operation["body"]
+        assert (record["before_fingerprint"] != record["after_fingerprint"]) is operation[
+            "changes_fingerprint"
+        ]
+
+
+def test_same_provider_operation_may_confirm_when_all_evidence_is_valid(
+    tmp_path, monitor_library
+):
+    operations = {
+        "only-valid": {
+            "changes_fingerprint": True,
+            "transport_rc": 0,
+            "http_status": 204,
+            "body": "valid-changing-update",
+        }
+    }
+    result, _ = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        config_model="proxy_provider",
+        provider_operations=operations,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _hypothesis_status(result.stdout, "proxy_provider_state") == "confirmed"
+    records = _provider_update_records(result.stdout)
+    assert len(records) == 1
+    assert records[0]["transport"] == "ok"
+    assert records[0]["http_status"] == "204"
+    assert records[0]["before_fingerprint"] != records[0]["after_fingerprint"]
+
+
 def test_remote_updates_are_skipped_when_the_inline_model_is_not_applicable(tmp_path, monitor_library):
     result, events = _diagnostic_run(tmp_path, monitor_library, config_model="inline")
     assert result.returncode == 0, result.stderr
@@ -1160,6 +1304,102 @@ def test_selection_persistence_classifies_only_complete_valid_evidence(
     assert _hypothesis_status(result.stdout, "selection_persistence") == expected_status
 
 
+def test_empty_original_exact_group_readback_stops_before_every_mutating_diagnostic(
+    tmp_path, monitor_library
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        group_readbacks=("__EMPTY__",),
+    )
+    _assert_fields_share_a_line(
+        result.stdout,
+        "reproduction",
+        "unresolved",
+        "reason",
+        "original_node_unavailable",
+        "requested_group",
+        "Default Proxy",
+    )
+    assert not any(event.get("operation") for event in events)
+    assert not any(event["kind"] == "restart" for event in events)
+    assert not any(event["kind"] == "http_probe" for event in events)
+    assert not any(
+        event["kind"] == "api" and event["method"] in {"PUT", "DELETE"}
+        for event in events
+    )
+
+
+def test_nonempty_original_exact_group_readback_allows_bounded_diagnostic_and_restore(
+    tmp_path, monitor_library
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_group="Default Proxy",
+        restart_node="JP-DIAGNOSTIC",
+    )
+    assert result.returncode == 0, result.stderr
+    operations = [event for event in events if event.get("operation")]
+    assert [(event["operation"], event["group"], event["target"]) for event in operations] == [
+        ("switch", "Default Proxy", "JP-DIAGNOSTIC"),
+        ("restore", "Default Proxy", "ORIGINAL-NODE"),
+    ]
+    assert _restore_record(result.stdout)["restore"] == "success"
+
+
+@pytest.mark.parametrize(
+    ("case", "group_options", "real_proxy_nodes"),
+    [
+        ("empty-selector-membership", (), ("ORIGINAL-NODE", "JP-OUTSIDE")),
+        (
+            "disjoint-selector-membership",
+            ("BALANCER-ONLY",),
+            ("ORIGINAL-NODE", "JP-OUTSIDE"),
+        ),
+    ],
+)
+def test_invalid_selector_membership_never_falls_back_to_all_real_proxies(
+    tmp_path, monitor_library, case, group_options, real_proxy_nodes
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        group_options=group_options,
+        real_proxy_nodes=real_proxy_nodes,
+        node_delays={"JP-OUTSIDE": 20},
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    _assert_fields_share_a_line(
+        result.stdout,
+        "reproduction",
+        "unresolved",
+        "reason",
+        "no_delay_reachable_candidate",
+    )
+    assert not any(event.get("operation") == "switch" for event in events)
+    assert not any(event["kind"] == "restart" for event in events)
+
+
+def test_valid_selector_and_real_proxy_intersection_supplies_the_candidate(
+    tmp_path, monitor_library
+):
+    result, events = _diagnostic_run(
+        tmp_path,
+        monitor_library,
+        probe_group="Default Proxy",
+        restart_node="JP-IN-BOTH",
+        group_options=("JP-IN-BOTH", "BALANCER-ONLY"),
+        real_proxy_nodes=("ORIGINAL-NODE", "JP-IN-BOTH", "US-OUTSIDE"),
+        node_delays={"JP-IN-BOTH": 20, "US-OUTSIDE": 5},
+    )
+    assert result.returncode == 0, result.stderr
+    switch_events = [event for event in events if event.get("operation") == "switch"]
+    assert [(event["group"], event["target"]) for event in switch_events] == [
+        ("Default Proxy", "JP-IN-BOTH")
+    ]
+
+
 @pytest.mark.parametrize(
     ("case", "selectable_nodes", "node_delays"),
     [
@@ -1225,11 +1465,15 @@ def test_diagnostic_emits_inputs_for_each_hypothesis_status(tmp_path, monitor_li
         assert any(re.search(r"status[=:](confirmed|rejected|unresolved)", line) for line in matching)
 
 
-def _run_library_case(tmp_path: Path, monitor_library: Path, body: str) -> subprocess.CompletedProcess[str]:
+def _run_library_case(
+    tmp_path: Path, monitor_library: Path, body: str, *, extra_env=None
+) -> subprocess.CompletedProcess[str]:
     config = tmp_path / "config"
     config.write_text(f'API_SECRET="test"\nLOG_FILE="{tmp_path / "monitor.log"}"\n')
     env = os.environ.copy()
     env.update({"VPN_MONITOR_CONFIG": str(config), "MONITOR_LIBRARY": str(monitor_library)})
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         ["bash", "-c", 'source "$MONITOR_LIBRARY"\n' + textwrap.dedent(body)],
         cwd=REPO_ROOT,
@@ -1242,6 +1486,138 @@ def _run_library_case(tmp_path: Path, monitor_library: Path, body: str) -> subpr
     assert "command not found" not in result.stderr.lower(), result.stderr
     assert "syntax error" not in result.stderr.lower(), result.stderr
     return result
+
+
+def _production_switch_case(
+    tmp_path,
+    monitor_library,
+    *,
+    transport="ok",
+    http_status="204",
+    restart_rc=0,
+    post_restart_node="CANDIDATE",
+    valid_retry_window=False,
+):
+    result = _run_library_case(
+        tmp_path,
+        monitor_library,
+        r'''
+        RETRY_MAX=3
+        RETRY_INTERVAL=0
+        events="$VPN_MONITOR_CONFIG.switch-events"
+        restarted="$VPN_MONITOR_CONFIG.restarted"
+        checks="$VPN_MONITOR_CONFIG.connectivity-checks"
+        current_reads="$VPN_MONITOR_CONFIG.current-reads"
+        : > "$events"
+        : > "$checks"
+        : > "$current_reads"
+
+        log() { :; }
+        sleep() { :; }
+        close_connections() { :; }
+        notify() { echo "notify:$1:$2" >> "$events"; }
+        get_selectable_nodes() { echo "CANDIDATE"; }
+        test_node_delay() { echo 10; }
+        get_routing_group() { echo "Fixed Group"; }
+        get_current_node() {
+            echo read >> "$current_reads"
+            count=$(wc -l < "$current_reads" | tr -d ' ')
+            if [ "$count" -eq 1 ]; then echo "CURRENT"; else echo "CANDIDATE"; fi
+        }
+        get_group_selected_node() {
+            echo "group-read:$1" >> "$events"
+            if [ -f "$restarted" ]; then
+                echo "$CASE_POST_RESTART_NODE"
+            else
+                echo "CANDIDATE"
+            fi
+        }
+        api_put() {
+            echo "legacy-put:$1" >> "$events"
+            return 0
+        }
+        api_put_status() {
+            echo "status-put:$1:$CASE_TRANSPORT:$CASE_HTTP_STATUS" >> "$events"
+            printf '%s\t%s\t%s\n' "$CASE_TRANSPORT" "$CASE_HTTP_STATUS" "switch-result"
+        }
+        restart_stash() {
+            echo "restart:rc=$CASE_RESTART_RC" >> "$events"
+            : > "$restarted"
+            return "$CASE_RESTART_RC"
+        }
+        check_connectivity() {
+            echo check >> "$events"
+            echo check >> "$checks"
+            count=$(wc -l < "$checks" | tr -d ' ')
+            if [ "$CASE_VALID_RETRY_WINDOW" = "true" ] && [ "$count" -lt "$RETRY_MAX" ]; then
+                echo validated-failure
+            else
+                echo pass
+            fi
+        }
+
+        switch_to_best_node
+        switch_rc=$?
+        echo "SWITCH_RESULT=$switch_rc"
+        echo "CHECK_COUNT=$(wc -l < "$checks" | tr -d ' ')"
+        ''',
+        extra_env={
+            "CASE_TRANSPORT": transport,
+            "CASE_HTTP_STATUS": http_status,
+            "CASE_RESTART_RC": str(restart_rc),
+            "CASE_POST_RESTART_NODE": post_restart_node,
+            "CASE_VALID_RETRY_WINDOW": "true" if valid_retry_window else "false",
+        },
+    )
+    events_path = tmp_path / "config.switch-events"
+    events = events_path.read_text().splitlines() if events_path.exists() else []
+    result_lines = [line for line in result.stdout.splitlines() if line.startswith("SWITCH_RESULT=")]
+    assert len(result_lines) == 1, result.stdout + result.stderr
+    switch_rc = int(result_lines[0].split("=", 1)[1])
+    return result, events, switch_rc
+
+
+@pytest.mark.parametrize(
+    ("case", "case_kwargs"),
+    [
+        ("put-transport-failure", {"transport": "failed", "http_status": "204"}),
+        ("put-http-500", {"transport": "ok", "http_status": "500"}),
+        ("restart-failure", {"restart_rc": 1}),
+        ("post-restart-exact-group-mismatch", {"post_restart_node": "OTHER-NODE"}),
+    ],
+)
+def test_production_switch_rejects_incomplete_operation_evidence_without_success_side_effects(
+    tmp_path, monitor_library, case, case_kwargs
+):
+    result, events, switch_rc = _production_switch_case(
+        tmp_path, monitor_library, **case_kwargs
+    )
+    assert result.returncode == 0, f"{case}: {result.stderr}"
+    assert switch_rc != 0, f"{case}: {result.stdout}"
+    assert not any(event.startswith("notify:") for event in events)
+    assert "check" not in events
+
+
+def test_production_switch_validates_exact_group_then_keeps_full_candidate_retry_window(
+    tmp_path, monitor_library
+):
+    result, events, switch_rc = _production_switch_case(
+        tmp_path,
+        monitor_library,
+        valid_retry_window=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert switch_rc == 0, result.stdout
+    assert [event for event in events if event.startswith("status-put:")] == [
+        "status-put:/proxies/Fixed%20Group:ok:204"
+    ]
+    assert not any(event.startswith("legacy-put:") for event in events)
+    assert [event for event in events if event == "group-read:Fixed Group"] == [
+        "group-read:Fixed Group",
+        "group-read:Fixed Group",
+    ]
+    assert events.count("check") == 3
+    assert len([event for event in events if event.startswith("notify:")]) == 1
 
 
 def test_ordinary_candidate_ranking_and_each_full_retry_window_are_unchanged(tmp_path, monitor_library):
