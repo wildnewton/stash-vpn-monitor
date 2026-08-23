@@ -320,9 +320,7 @@ get_selectable_nodes() {
     options=$(get_group_options)
 
     if [ -z "$options" ]; then
-        # Fallback: 回傳所有真實代理節點（可能包含不可選節點，如 Balancer 成員）
-        log "    WARNING: group options 為空，fallback 到全部代理節點（可能包含不可選節點）"
-        get_proxy_nodes
+        log "    WARNING: group options 為空，沒有可安全切換的節點"
         return
     fi
 
@@ -330,12 +328,7 @@ get_selectable_nodes() {
     local result
     result=$(get_proxy_nodes | grep -Fxf <(echo "$options") 2>/dev/null)
 
-    if [ -n "$result" ]; then
-        echo "$result"
-    else
-        # Fallback: 交集為空時回傳所有真實代理節點
-        get_proxy_nodes
-    fi
+    [ -n "$result" ] && echo "$result"
 }
 
 # 切換到指定節點（帶重試，解決重啟後 API 不穩定問題）
@@ -353,24 +346,32 @@ switch_node() {
         local encoded_group
         encoded_group=$(urlencode "$group")
 
+        local put_result put_transport put_status put_body
+        local pre_restart post_restart restart_ready=false
         close_connections
         sleep 1
-        api_put "/proxies/$encoded_group" "$(jq -n --arg name "$target" '{name: $name}')" >/dev/null 2>&1
+        put_result=$(api_put_status "/proxies/$encoded_group" "$(jq -n --arg name "$target" '{name: $name}')")
+        IFS=$'\t' read -r put_transport put_status put_body <<< "$put_result"
         sleep 2
         close_connections
         sleep 2
 
-        local current
-        current=$(get_current_node)
-        if [ "$current" = "$target" ]; then
+        pre_restart=$(get_group_selected_node "$group")
+        if [ "$put_transport" = "ok" ] && echo "$put_status" | grep -Eq '^2[0-9][0-9]$' && \
+           [ "$pre_restart" = "$target" ]; then
             log "    節點切換成功: ${target} — 同步 GUI（重啟 Stash）"
-            restart_stash
-            LAST_SWITCHED_GROUP="$group"
-            return 0
+            if restart_stash; then
+                restart_ready=true
+                post_restart=$(get_group_selected_node "$group")
+                if [ "$post_restart" = "$target" ]; then
+                    LAST_SWITCHED_GROUP="$group"
+                    return 0
+                fi
+            fi
         fi
 
         if [ $i -lt "$max_retries" ]; then
-            log "    節點切換重試 (${i}/${max_retries})：${current} → ${target}..."
+            log "    節點切換重試 (${i}/${max_retries})：transport=${put_transport} http=${put_status} pre=${pre_restart:-empty} restart=${restart_ready} post=${post_restart:-empty} → ${target}..."
             sleep $RETRY_INTERVAL
         fi
     done
@@ -1204,10 +1205,15 @@ cmd_live_test() {
     model=$(diagnostic_active_config_model)
     routing_group=$(get_routing_group)
     original_node=$(diagnostic_group_selected_node "$routing_group")
-    requested_node=$(diagnostic_select_candidate "$original_node" "$candidate_limit")
+    requested_node=""
     requested_delay=0
 
     echo "DIAG active_config_model=${model} candidate_limit=${candidate_limit} delay_timeout_ms=${DELAY_TIMEOUT}"
+    if [ -z "$original_node" ]; then
+        echo "DIAG reproduction=unresolved reason=original_node_unavailable requested_group=${routing_group} attempt_bound=${max_attempts}"
+        return 0
+    fi
+    requested_node=$(diagnostic_select_candidate "$original_node" "$candidate_limit")
     if [ -z "$requested_node" ]; then
         echo "DIAG reproduction=unresolved reason=no_delay_reachable_candidate attempt_bound=${max_attempts}"
         return 0
@@ -1335,7 +1341,7 @@ cmd_live_test() {
             ;;
     esac
 
-    local provider_applicable=false provider_changed=false provider_before provider_after provider_name provider_result provider_transport provider_status provider_body encoded_provider
+    local provider_applicable=false provider_confirmed=false provider_before provider_after provider_name provider_result provider_transport provider_status provider_body encoded_provider
     case "$model" in
         proxy-provider|combination) provider_applicable=true ;;
     esac
@@ -1349,8 +1355,9 @@ cmd_live_test() {
             sleep "$settle_seconds"
             provider_after=$(api_get /providers/proxies | diagnostic_text_fingerprint)
             echo "DIAG provider_update=${provider_name} transport=${provider_transport} http_status=${provider_status} result=${provider_body} before_fingerprint=${provider_before} after_fingerprint=${provider_after}"
-            if [ "$provider_before" != "$provider_after" ] && [ "$provider_status" -ge 200 ] && [ "$provider_status" -lt 300 ] 2>/dev/null; then
-                provider_changed=true
+            if [ "$provider_before" != "$provider_after" ] && [ "$provider_transport" = "ok" ] && \
+               [ "$provider_status" -ge 200 ] 2>/dev/null && [ "$provider_status" -lt 300 ] 2>/dev/null; then
+                provider_confirmed=true
             fi
             provider_before="$provider_after"
         done < <(api_get /providers/proxies | jq -r '.providers | keys[]?' 2>/dev/null)
@@ -1396,7 +1403,7 @@ cmd_live_test() {
             ;;
         *) whole_status="unresolved" ;;
     esac
-    if $provider_applicable && $provider_changed && [ "$provider_transport" = "ok" ] && [ "$provider_status" -ge 200 ] 2>/dev/null && [ "$provider_status" -lt 300 ] 2>/dev/null; then
+    if $provider_applicable && $provider_confirmed; then
         provider_state_status="confirmed"
     else
         provider_state_status="unresolved"
