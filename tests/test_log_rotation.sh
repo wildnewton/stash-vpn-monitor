@@ -54,9 +54,9 @@ echo "rotate_log:"
 printf '[2026-08-01 09:00:00] 狀態: 正常（Ping + HTTP 均正常）\n' >> "$LOG_FILE"
 printf '[2026-08-01 10:00:00] 狀態: 正常\n' >> "$LOG_FILE"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
-check "archives active log to vpn_monitor.log.YYYY-MM-DD" "[ -f \"${LOG_FILE}.2026-08-01\" ]"
-check "archive keeps original content" "grep -q '2026-08-01 09:00:00' \"${LOG_FILE}.2026-08-01\""
-check "active log no longer holds the archived observations" "! grep -q 'Ping + HTTP 均正常' \"$LOG_FILE\""
+check "archives active log to vpn_monitor.log.YYYY-MM-DD" "[ -f "${LOG_FILE}.2026-08-01" ]"
+check "archive keeps original content" "grep -q '2026-08-01 09:00:00' "${LOG_FILE}.2026-08-01""
+check "active log no longer holds the archived observations" "! grep -q 'Ping + HTTP 均正常' "$LOG_FILE""
 
 # A2. migration: a legacy active log can span many dates. Its archive name is
 # based on the first timestamp, but pruning must preserve it while its latest
@@ -90,7 +90,7 @@ rm -f "$LOG_FILE" "${LOG_FILE}".*
 : > "$LOG_FILE"
 printf '[2026-08-23 09:00:00] 狀態: 正常\n' >> "$LOG_FILE"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
-check "does not rotate when first valid date == today" "[ -f \"$LOG_FILE\" ] && [ ! -f \"${LOG_FILE}.2026-08-23\" ]"
+check "does not rotate when first valid date == today" "[ -f "$LOG_FILE" ] && [ ! -f "${LOG_FILE}.2026-08-23" ]"
 
 # C. no active log: do not create one, but retention cleanup must still run.
 rm -f "$LOG_FILE" "${LOG_FILE}".*
@@ -123,10 +123,10 @@ printf 'x\n' > "${LOG_FILE}.${del1}"
 printf 'x\n' > "${LOG_FILE}.old"                 # legacy, must survive
 printf 'x\n' > "${LOG_FILE}.bak"                 # unrelated suffix, must survive
 VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
-check "retains dated logs within 30d window" "[ -f \"${LOG_FILE}.${keep1}\" ] && [ -f \"${LOG_FILE}.${keep2}\" ] && [ -f \"${LOG_FILE}.${keep3}\" ]"
-check "deletes dated logs older than retention" "[ ! -f \"${LOG_FILE}.${del1}\" ]"
-check "preserves legacy .old" "[ -f \"${LOG_FILE}.old\" ]"
-check "preserves unrelated suffix (.bak)" "[ -f \"${LOG_FILE}.bak\" ]"
+check "retains dated logs within 30d window" "[ -f "${LOG_FILE}.${keep1}" ] && [ -f "${LOG_FILE}.${keep2}" ] && [ -f "${LOG_FILE}.${keep3}" ]"
+check "deletes dated logs older than retention" "[ ! -f "${LOG_FILE}.${del1}" ]"
+check "preserves legacy .old" "[ -f "${LOG_FILE}.old" ]"
+check "preserves unrelated suffix (.bak)" "[ -f "${LOG_FILE}.bak" ]"
 
 # Content timestamps, not just archive filename, define safe expiry for a
 # multi-day archive created during migration.
@@ -161,15 +161,15 @@ rm -f "$LOG_FILE" "${LOG_FILE}".*
 printf 'x\n' > "${LOG_FILE}.2026-08-20"
 printf 'x\n' > "${LOG_FILE}.old"
 VPN_LOG_DATE_OVERRIDE="$TODAY" cmd_uninstall "" --delete-logs >/dev/null 2>&1 || true
-check "delete-logs removes active log" "[ ! -f \"$LOG_FILE\" ]"
-check "delete-logs removes legacy .old" "[ ! -f \"${LOG_FILE}.old\" ]"
-check "delete-logs removes dated archives" "[ ! -f \"${LOG_FILE}.2026-08-20\" ]"
+check "delete-logs removes active log" "[ ! -f "$LOG_FILE" ]"
+check "delete-logs removes legacy .old" "[ ! -f "${LOG_FILE}.old" ]"
+check "delete-logs removes dated archives" "[ ! -f "${LOG_FILE}.2026-08-20" ]"
 
 # E. keep_logs (default) preserves dated archives
 rm -f "$LOG_FILE" "${LOG_FILE}".*
 printf 'x\n' > "${LOG_FILE}.2026-08-20"
 VPN_LOG_DATE_OVERRIDE="$TODAY" cmd_uninstall "" >/dev/null 2>&1 || true
-check "default keeps dated archives" "[ -f \"${LOG_FILE}.2026-08-20\" ]"
+check "default keeps dated archives" "[ -f "${LOG_FILE}.2026-08-20" ]"
 
 echo ""
 if [ "$fail" -eq 0 ]; then
