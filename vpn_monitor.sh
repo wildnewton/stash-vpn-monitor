@@ -626,7 +626,7 @@ log_retention_cutoff() {
     fi
 }
 
-# 從日誌內容取第一個／最後一個有效 timestamp 日期。
+# 從日誌內容取第一個／最新有效 timestamp 日期。
 first_log_date() {
     awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { print substr($0, 2, 10); exit }' "$1" 2>/dev/null
 }
@@ -665,7 +665,7 @@ rotate_log() {
 }
 
 # 清理超過保留期的 dated 日誌；不動 legacy .old 或其他後綴。
-# 正常 archive 只看檔名；只有檔名已過期、準備刪除時才檢查最後 timestamp，
+# 正常 archive 只看檔名；只有檔名已過期、準備刪除時才檢查最新 timestamp，
 # 避免 migration 形成的跨多日 archive 因第一日檔名而提早刪除。
 prune_old_logs() {
     local dir base cutoff f d filename_date
