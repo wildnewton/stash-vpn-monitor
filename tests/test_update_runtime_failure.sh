@@ -7,17 +7,17 @@ INSTALLER="$REPO_ROOT/install_vpn_monitor.sh"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-repo="$tmpdir/repo"
+FAKE_REPO="$tmpdir/repo"
 dest="$tmpdir/bin"
-mkdir -p "$repo" "$dest"
+mkdir -p "$FAKE_REPO" "$dest"
 
 # Fake repo/install payloads exercise cmd_update without touching git or the
 # real filesystem. The installed entrypoint must stay old when the new runtime
 # cannot be copied.
-printf 'new-monitor\n' > "$repo/vpn_monitor.sh"
-printf 'new-runtime\n' > "$repo/vpn_runtime.sh"
-printf 'new-switcher\n' > "$repo/stash_switch_config.py"
-printf 'new-report\n' > "$repo/vpn_report.py"
+printf 'new-monitor\n' > "$FAKE_REPO/vpn_monitor.sh"
+printf 'new-runtime\n' > "$FAKE_REPO/vpn_runtime.sh"
+printf 'new-switcher\n' > "$FAKE_REPO/stash_switch_config.py"
+printf 'new-report\n' > "$FAKE_REPO/vpn_report.py"
 printf 'old-monitor\n' > "$dest/vpn_monitor.sh"
 printf 'old-runtime\n' > "$dest/vpn_runtime.sh"
 
@@ -26,14 +26,14 @@ cat > "$config_file" <<EOF
 API_SECRET="test-secret"
 LOG_FILE="$tmpdir/vpn_monitor.log"
 CHECK_INTERVAL="300"
-MONITOR_REPO="$repo"
+MONITOR_REPO="$FAKE_REPO"
 INSTALL_DIR="$dest"
 PYTHON_BIN="python3"
 EOF
 
 VPN_MONITOR_CONFIG="$config_file" source "$MONITOR"
 
-detect_repo() { echo "$repo"; }
+detect_repo() { echo "$FAKE_REPO"; }
 git() {
     case " $* " in
         *" pull "*) echo "Already up to date." ;;
@@ -44,7 +44,7 @@ git() {
 }
 stat() { echo "fake-time"; return 0; }
 cp() {
-    if [ "$1" = "$repo/vpn_runtime.sh" ]; then
+    if [ "$1" = "$FAKE_REPO/vpn_runtime.sh" ]; then
         return 1
     fi
     command cp "$1" "$2"
