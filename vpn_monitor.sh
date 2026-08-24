@@ -297,7 +297,6 @@ cmd_live_test() {
 
     local encoded_group
     encoded_group=$(urlencode "$routing_group")
-
     # 使用 switch_to_best_node（與恢復流程相同策略，測試真實路徑）
     # 內部含節點名驗證 + 連通性重試驗證
     echo "  使用 switch_to_best_node 切換到最佳節點（與恢復流程相同）..."
@@ -717,10 +716,23 @@ cmd_update() {
     local dest_dir="${INSTALL_DIR:-$HOME/.local/bin}"
     local updated=0
 
-    cp "$repo/vpn_monitor.sh" "$dest_dir/vpn_monitor.sh" && updated=$((updated + 1))
-    cp "$repo/vpn_runtime.sh" "$dest_dir/vpn_runtime.sh" && updated=$((updated + 1))
+    # Runtime is a required dependency of the new entrypoint. Install it first so
+    # a failed copy cannot leave a new vpn_monitor.sh paired with an old runtime.
+    if ! cp "$repo/vpn_runtime.sh" "$dest_dir/vpn_runtime.sh"; then
+        echo "✗ 更新失敗: 無法複製 vpn_runtime.sh"
+        return 1
+    fi
+    updated=$((updated + 1))
+
     cp "$repo/stash_switch_config.py" "$dest_dir/stash_switch_config.py" && updated=$((updated + 1))
     cp "$repo/vpn_report.py" "$dest_dir/vpn_report.py" && updated=$((updated + 1))
+
+    # Replace the entrypoint last, after its required runtime is safely in place.
+    if ! cp "$repo/vpn_monitor.sh" "$dest_dir/vpn_monitor.sh"; then
+        echo "✗ 更新失敗: 無法複製 vpn_monitor.sh"
+        return 1
+    fi
+    updated=$((updated + 1))
 
     echo "  已更新 ${updated} 個檔案"
     echo ""

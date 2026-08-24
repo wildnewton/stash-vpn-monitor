@@ -138,13 +138,14 @@ fi
 # 3. 複製腳本
 echo ""
 echo "[3/8] 安裝監控腳本..."
+
+# 先放置 runtime dependency；若此步失敗，set -e 會在舊 entrypoint 被覆蓋前停止。
+cp "$SRC_RUNTIME_MODULE" "$INSTALL_RUNTIME_MODULE"
+echo "    ✓ $INSTALL_RUNTIME_MODULE"
+
 cp "$SRC_SCRIPT" "$INSTALL_SCRIPT"
 chmod +x "$INSTALL_SCRIPT"
 echo "    ✓ $INSTALL_SCRIPT"
-
-# 複製 runtime module（vpn_monitor.sh 的監控/恢復函數）
-cp "$SRC_RUNTIME_MODULE" "$INSTALL_RUNTIME_MODULE"
-echo "    ✓ $INSTALL_RUNTIME_MODULE"
 
 # 複製 report implementation（vpn_monitor.sh --report 依賴它）
 cp "$SRC_REPORT_SCRIPT" "$INSTALL_REPORT_SCRIPT"
