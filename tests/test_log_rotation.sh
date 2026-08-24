@@ -58,16 +58,101 @@ check "archives active log to vpn_monitor.log.YYYY-MM-DD" "[ -f "${LOG_FILE}.202
 check "archive keeps original content" "grep -q '2026-08-01 09:00:00' "${LOG_FILE}.2026-08-01""
 check "active log no longer holds the archived observations" "! grep -q 'Ping + HTTP 均正常' "$LOG_FILE""
 
-# B. no rotation when first-line date == today
+# A2. migration: a legacy active log can span many dates. Its archive name is
+# based on the first timestamp, but pruning must preserve it while its latest
+# timestamp is still within retention.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-20 09:00:00] old legacy entry\n' > "$LOG_FILE"
+printf '[2026-08-20 09:00:00] recent legacy entry\n' >> "$LOG_FILE"
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+check "multi-day legacy archive is not pruned by its old filename" "[ -f \"${LOG_FILE}.2026-07-20\" ]"
+check "multi-day legacy archive retains recent entries" "grep -q '2026-08-20 09:00:00' \"${LOG_FILE}.2026-07-20\""
+
+# A3. a malformed leading line must not block rotation if later timestamped
+# entries identify the log date.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf 'partial/corrupt line\n' > "$LOG_FILE"
+printf '[2026-08-22 09:00:00] valid entry\n' >> "$LOG_FILE"
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+check "finds first valid timestamp past malformed leading line" "[ -f \"${LOG_FILE}.2026-08-22\" ]"
+check "archive preserves malformed line rather than discarding it" "grep -q 'partial/corrupt line' \"${LOG_FILE}.2026-08-22\""
+
+# A3b. timestamp-shaped garbage and future dates must not become archive names.
+# Otherwise rotation can create files the report reader ignores or retention can
+# be held open by a bogus far-future timestamp.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[9999-99-99 00:00:00] malformed timestamp-shaped line\n' > "$LOG_FILE"
+printf '[2099-12-31 00:00:00] future timestamp-shaped line\n' >> "$LOG_FILE"
+printf '[2026-08-22 09:00:00] valid entry\n' >> "$LOG_FILE"
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+check "ignores malformed/future timestamp-shaped leading lines" "[ -f \"${LOG_FILE}.2026-08-22\" ]"
+check "does not create malformed or future dated archive" "[ ! -e \"${LOG_FILE}.9999-99-99\" ] && [ ! -e \"${LOG_FILE}.2099-12-31\" ]"
+
+# A4. never overwrite an existing same-date archive; preserve both segments.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-01 08:00:00] earlier archived segment\n' > "${LOG_FILE}.2026-08-01"
+printf '[2026-08-01 09:00:00] later active segment\n' > "$LOG_FILE"
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+check "existing same-date archive content survives rotation" "grep -q 'earlier archived segment' \"${LOG_FILE}.2026-08-01\""
+check "active same-date segment is preserved too" "grep -q 'later active segment' \"${LOG_FILE}.2026-08-01\""
+
+# A5. collision merge must detach active log before copying it. Inject a write
+# immediately after cat reads its source; old cat(active) -> truncate(active)
+# behavior loses that concurrent line, while detach -> cat(segment) preserves it.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-01 08:00:00] earlier archived segment\n' > "${LOG_FILE}.2026-08-01"
+printf '[2026-08-01 09:00:00] later active segment\n' > "$LOG_FILE"
+inject_concurrent_write=true
+cat() {
+    command cat "$@"
+    if $inject_concurrent_write; then
+        inject_concurrent_write=false
+        printf '[2026-08-23 10:00:00] concurrent writer\n' >> "$LOG_FILE"
+    fi
+}
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+unset -f cat
+check "concurrent writer survives same-date collision rotation" "grep -q 'concurrent writer' \"$LOG_FILE\" || grep -q 'concurrent writer' \"${LOG_FILE}.2026-08-01\""
+
+# A6. if both collision append and active-file restore append fail, the detached
+# segment must remain on disk. Deleting it would turn a write failure into data loss.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-01 08:00:00] earlier archived segment\n' > "${LOG_FILE}.2026-08-01"
+printf '[2026-08-01 09:00:00] later active segment\n' > "$LOG_FILE"
+cat_calls=0
+cat() {
+    cat_calls=$((cat_calls + 1))
+    if [ "$cat_calls" -eq 1 ]; then
+        printf '[2026-08-23 10:00:00] concurrent writer\n' > "$LOG_FILE"
+    fi
+    return 1
+}
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+unset -f cat
+check "failed collision recovery keeps detached segment data" "grep -q 'later active segment' \"$LOG_FILE\" || grep -q 'later active segment' \"${LOG_FILE}.2026-08-01\" || grep -q 'later active segment' \"${LOG_FILE}.rotate.\"* 2>/dev/null"
+
+# B. no rotation when first valid date == today
+rm -f "$LOG_FILE" "${LOG_FILE}".*
 : > "$LOG_FILE"
 printf '[2026-08-23 09:00:00] 狀態: 正常\n' >> "$LOG_FILE"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
-check "does not rotate when first-line date == today" "[ -f "$LOG_FILE" ] && [ ! -f "${LOG_FILE}.2026-08-23" ]"
+check "does not rotate when first valid date == today" "[ -f "$LOG_FILE" ] && [ ! -f "${LOG_FILE}.2026-08-23" ]"
 
-# C. no-op when log absent
+# C. no active log: do not create one, but retention cleanup must still run.
 rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-01 09:00:00] expired archive entry\n' > "${LOG_FILE}.2026-07-01"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
-check "no-op when log file absent" "[ ! -f "$LOG_FILE" ]"
+check "does not create active log when absent" "[ ! -f \"$LOG_FILE\" ]"
+check "prunes expired archive even when active log is absent" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
+
+# C2. even if the active log has no parseable timestamp, retention cleanup
+# must still run instead of being permanently disabled by the bad first line.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf 'unparseable active content\n' > "$LOG_FILE"
+printf 'old archive\n' > "${LOG_FILE}.2026-07-01"
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+check "unparseable active log does not block pruning" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
+check "unparseable active log itself is preserved" "grep -q 'unparseable active content' \"$LOG_FILE\""
 
 # ---- prune_old_logs ----
 echo "prune_old_logs:"
@@ -88,6 +173,40 @@ check "retains dated logs within 30d window" "[ -f "${LOG_FILE}.${keep1}" ] && [
 check "deletes dated logs older than retention" "[ ! -f "${LOG_FILE}.${del1}" ]"
 check "preserves legacy .old" "[ -f "${LOG_FILE}.old" ]"
 check "preserves unrelated suffix (.bak)" "[ -f "${LOG_FILE}.bak" ]"
+
+# Content timestamps, not just archive filename, define safe expiry for a
+# multi-day archive created during migration.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-20 09:00:00] old entry\n' > "${LOG_FILE}.2026-07-20"
+printf '[2026-08-20 09:00:00] recent entry\n' >> "${LOG_FILE}.2026-07-20"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "pruning keeps old-named archive with recent timestamped content" "[ -f \"${LOG_FILE}.2026-07-20\" ]"
+
+# The latest timestamp is defined by time, not physical line order. Clock/timezone
+# changes can make later-written lines older than earlier lines; a recent entry
+# anywhere in the archive must protect it from premature pruning.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-20 09:00:00] recent entry written first\n' > "${LOG_FILE}.2026-07-20"
+printf '[2026-07-20 10:00:00] older timestamp written later\n' >> "${LOG_FILE}.2026-07-20"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "pruning uses latest timestamp, not last physical timestamp" "[ -f \"${LOG_FILE}.2026-07-20\" ] && grep -q '2026-08-20 09:00:00' \"${LOG_FILE}.2026-07-20\""
+
+# Content-aware protection must not leak expired archives forever: if every
+# timestamp in an old-named archive is older than cutoff, it is still deleted.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-01 09:00:00] expired entry one\n' > "${LOG_FILE}.2026-07-01"
+printf '[2026-07-02 09:00:00] expired entry two\n' >> "${LOG_FILE}.2026-07-01"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "deletes timestamped archive when all entries are expired" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
+
+# Malformed or far-future timestamp-shaped garbage must not keep an otherwise
+# expired archive alive beyond the retention window.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-01 09:00:00] expired real entry\n' > "${LOG_FILE}.2026-07-01"
+printf '[2099-12-31 00:00:00] future garbage\n' >> "${LOG_FILE}.2026-07-01"
+printf '[9999-99-99 00:00:00] malformed garbage\n' >> "${LOG_FILE}.2026-07-01"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "malformed/future timestamps do not block pruning" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
 
 # ---- cmd_uninstall log handling ----
 echo "cmd_uninstall log handling:"
