@@ -11,9 +11,9 @@ repo="$tmpdir/repo"
 dest="$tmpdir/bin"
 mkdir -p "$repo" "$dest"
 
-# Fake repo/install payloads let us exercise cmd_update without touching git or
-# the real filesystem. The installed entrypoint must stay old when the new
-# runtime cannot be copied.
+# Fake repo/install payloads exercise cmd_update without touching git or the
+# real filesystem. The installed entrypoint must stay old when the new runtime
+# cannot be copied.
 printf 'new-monitor\n' > "$repo/vpn_monitor.sh"
 printf 'new-runtime\n' > "$repo/vpn_runtime.sh"
 printf 'new-switcher\n' > "$repo/stash_switch_config.py"
