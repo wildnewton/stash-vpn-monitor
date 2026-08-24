@@ -77,6 +77,17 @@ VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
 check "finds first valid timestamp past malformed leading line" "[ -f \"${LOG_FILE}.2026-08-22\" ]"
 check "archive preserves malformed line rather than discarding it" "grep -q 'partial/corrupt line' \"${LOG_FILE}.2026-08-22\""
 
+# A3b. timestamp-shaped garbage and future dates must not become archive names.
+# Otherwise rotation can create files the report reader ignores or retention can
+# be held open by a bogus far-future timestamp.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[9999-99-99 00:00:00] malformed timestamp-shaped line\n' > "$LOG_FILE"
+printf '[2099-12-31 00:00:00] future timestamp-shaped line\n' >> "$LOG_FILE"
+printf '[2026-08-22 09:00:00] valid entry\n' >> "$LOG_FILE"
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+check "ignores malformed/future timestamp-shaped leading lines" "[ -f \"${LOG_FILE}.2026-08-22\" ]"
+check "does not create malformed or future dated archive" "[ ! -e \"${LOG_FILE}.9999-99-99\" ] && [ ! -e \"${LOG_FILE}.2099-12-31\" ]"
+
 # A4. never overwrite an existing same-date archive; preserve both segments.
 rm -f "$LOG_FILE" "${LOG_FILE}".*
 printf '[2026-08-01 08:00:00] earlier archived segment\n' > "${LOG_FILE}.2026-08-01"
@@ -84,6 +95,24 @@ printf '[2026-08-01 09:00:00] later active segment\n' > "$LOG_FILE"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
 check "existing same-date archive content survives rotation" "grep -q 'earlier archived segment' \"${LOG_FILE}.2026-08-01\""
 check "active same-date segment is preserved too" "grep -q 'later active segment' \"${LOG_FILE}.2026-08-01\""
+
+# A5. collision merge must detach active log before copying it. Inject a write
+# immediately after cat reads its source; old cat(active) -> truncate(active)
+# behavior loses that concurrent line, while detach -> cat(segment) preserves it.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-01 08:00:00] earlier archived segment\n' > "${LOG_FILE}.2026-08-01"
+printf '[2026-08-01 09:00:00] later active segment\n' > "$LOG_FILE"
+inject_concurrent_write=true
+cat() {
+    command cat "$@"
+    if $inject_concurrent_write; then
+        inject_concurrent_write=false
+        printf '[2026-08-23 10:00:00] concurrent writer\n' >> "$LOG_FILE"
+    fi
+}
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+unset -f cat
+check "concurrent writer survives same-date collision rotation" "grep -q 'concurrent writer' \"$LOG_FILE\" || grep -q 'concurrent writer' \"${LOG_FILE}.2026-08-01\""
 
 # B. no rotation when first valid date == today
 rm -f "$LOG_FILE" "${LOG_FILE}".*
@@ -152,6 +181,15 @@ printf '[2026-07-01 09:00:00] expired entry one\n' > "${LOG_FILE}.2026-07-01"
 printf '[2026-07-02 09:00:00] expired entry two\n' >> "${LOG_FILE}.2026-07-01"
 VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
 check "deletes timestamped archive when all entries are expired" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
+
+# Malformed or far-future timestamp-shaped garbage must not keep an otherwise
+# expired archive alive beyond the retention window.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-01 09:00:00] expired real entry\n' > "${LOG_FILE}.2026-07-01"
+printf '[2099-12-31 00:00:00] future garbage\n' >> "${LOG_FILE}.2026-07-01"
+printf '[9999-99-99 00:00:00] malformed garbage\n' >> "${LOG_FILE}.2026-07-01"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "malformed/future timestamps do not block pruning" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
 
 # ---- cmd_uninstall log handling ----
 echo "cmd_uninstall log handling:"
