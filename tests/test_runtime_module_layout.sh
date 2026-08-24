@@ -56,10 +56,10 @@ VPN_MONITOR_CONFIG="$config_file" bash -c 'source "$1"; declare -F cmd_monitor >
 
 # Existing behavioral tests must consume supported source boundaries rather than
 # manufacturing a pseudo-library by truncating production source at a comment.
-if grep -Fq "sed '/^# ===================== 入口/,$d'" "$NODE_TEST"; then
+if grep -Fq '入口/,$d' "$NODE_TEST"; then
     fail "node ranking tests must source vpn_runtime.sh directly"
 fi
-if grep -Fq "sed '/^# ===================== 入口/,$d'" "$ROTATION_TEST"; then
+if grep -Fq '入口/,$d' "$ROTATION_TEST"; then
     fail "log rotation tests must source production source directly"
 fi
 
