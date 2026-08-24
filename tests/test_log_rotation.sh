@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for Issue #15: time-based log rotation + 30-day retention.
-# Sources only the function section of vpn_monitor.sh (everything before 入口),
-# then drives rotate_log / prune_old_logs / cmd_uninstall directly.
+# Sources the guarded production entrypoint directly, then drives
+# rotate_log / prune_old_logs / cmd_uninstall without dispatching a command.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,9 +9,6 @@ SCRIPT="$REPO_ROOT/vpn_monitor.sh"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-
-lib_file="$tmpdir/lib.sh"
-sed '/^# ===================== 入口/,$d' "$SCRIPT" > "$lib_file"
 
 config_file="$tmpdir/config"
 : > "$config_file"
@@ -31,7 +28,7 @@ TODAY="${VPN_LOG_DATE_OVERRIDE:-2026-08-23}"
 export LOG_FILE="$tmpdir/vpn_monitor.log"
 export LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 export VPN_LOG_DATE_OVERRIDE="$TODAY"
-VPN_MONITOR_CONFIG="$config_file" source "$lib_file"
+VPN_MONITOR_CONFIG="$config_file" source "$SCRIPT"
 
 pass=0
 fail=0

@@ -4,35 +4,22 @@ set -euo pipefail
 # =============================================================
 # Node Ranking Policy Tests — behavioral + structural
 #
-# Source production functions, mock dependencies, and test runtime ranking.
+# Source production runtime functions, mock dependencies, and test ranking.
 # Compatible with bash 3.2+ (macOS default).
 # =============================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/vpn_monitor.sh"
+RUNTIME="$REPO_ROOT/vpn_runtime.sh"
 
-if [[ ! -f "$SCRIPT" ]]; then
-    echo "FAIL: vpn_monitor.sh not found at $SCRIPT" >&2
+if [[ ! -f "$RUNTIME" ]]; then
+    echo "FAIL: vpn_runtime.sh not found at $RUNTIME" >&2
     exit 1
 fi
 
-# ── Source production functions with mocks ──
-
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-
-config_file="$tmpdir/config"
-cat > "$config_file" <<EOF
-API_SECRET="***"
-LOG_FILE="$tmpdir/vpn_monitor.log"
-CHECK_INTERVAL="300"
-EOF
-
-# Source the production functions without running the script entrypoint.
-lib_file="$tmpdir/vpn_monitor_lib.sh"
-sed '/^# ===================== 入口/,$d' "$SCRIPT" > "$lib_file"
+# Source the supported production runtime boundary directly.
 # shellcheck source=/dev/null
-VPN_MONITOR_CONFIG="$config_file" source "$lib_file"
+source "$RUNTIME"
 
 # Keep tests fast and deterministic.
 RETRY_MAX=1
@@ -349,7 +336,7 @@ echo ""
 echo "[Structural] function property tests"
 
 # Verify no allow_hk parameter in function signature
-sig=$(sed -n '/^switch_to_best_node() {/,/^log "/p' "$SCRIPT" | head -5 || true)
+sig=$(sed -n '/^switch_to_best_node() {/,/^log "/p' "$RUNTIME" | head -5 || true)
 if echo "$sig" | grep -q 'allow_hk'; then
     check "No allow_hk parameter in switch_to_best_node()" 1
 else
@@ -357,24 +344,24 @@ else
 fi
 
 # Verify single pass (no switch_to_best_node false/true calls anywhere)
-false_calls=$(grep -c 'switch_to_best_node false' "$SCRIPT" || true)
-true_calls=$(grep -c 'switch_to_best_node true' "$SCRIPT" || true)
+false_calls=$(grep -h -c 'switch_to_best_node false' "$RUNTIME" "$SCRIPT" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+true_calls=$(grep -h -c 'switch_to_best_node true' "$RUNTIME" "$SCRIPT" 2>/dev/null | awk '{s+=$1} END {print s+0}')
 [[ "${false_calls:-0}" -eq 0 ]] && [[ "${true_calls:-0}" -eq 0 ]]
-check "No two-pass pattern (switch_to_best_node false/true) in entire script" $?
+check "No two-pass pattern (switch_to_best_node false/true) in runtime/entrypoint" $?
 
 # Verify correct log message
-grep -Fq 'JP/SG > TW > US > other non-HK > HK' "$SCRIPT"
+grep -Fq 'JP/SG > TW > US > other non-HK > HK' "$RUNTIME"
 check "Log message says 'JP/SG > TW > US > other non-HK > HK'" $?
 
 # Verify old pattern removed
-if grep -Fq 'SG > JP' "$SCRIPT"; then
+if grep -Fq 'SG > JP' "$RUNTIME" "$SCRIPT"; then
     check "Old 'SG > JP' ranking pattern removed" 1
 else
     check "Old 'SG > JP' ranking pattern removed" 0
 fi
 
 # Verify delay=0 exclusion exists in function body
-func_body=$(sed -n '/^switch_to_best_node() {/,/^}/p' "$SCRIPT" || true)
+func_body=$(sed -n '/^switch_to_best_node() {/,/^}/p' "$RUNTIME" || true)
 echo "$func_body" | grep -q '\[ "\$delay" -eq 0 \]'
 check "delay=0 exclusion condition exists in function body" $?
 
