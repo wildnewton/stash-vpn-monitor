@@ -33,7 +33,7 @@ cd vpn-monitor
 - 從 Stash plist 提取 API secret
 - 偵測已安裝 pyobjc 的 Python 環境
 - 生成配置檔案 `~/.config/vpn_monitor/config`
-- 複製腳本到 `~/.local/bin/`
+- 複製執行腳本及其 runtime/report/config-switcher 依賴到 `~/.local/bin/`
 - 載入 LaunchAgent（默認每 300 秒 / 5 分鐘檢查一次）
 
 ## 配置
@@ -82,7 +82,9 @@ vpn_monitor.sh --uninstall [--delete-logs]  # 完全卸載
 ## 檔案結構
 
 ```
-├── vpn_monitor.sh              # 主監控腳本
+├── vpn_monitor.sh              # CLI / LaunchAgent entrypoint 與命令模式
+├── vpn_runtime.sh              # Stash API、連通性、節點切換與恢復 runtime
+├── vpn_report.py               # 歷史日誌狀態報告
 ├── stash_switch_config.py      # Config 切換器（AX API）
 ├── install_vpn_monitor.sh      # 一鍵安裝
 ├── com.user.vpn-monitor.plist  # LaunchAgent 模板
