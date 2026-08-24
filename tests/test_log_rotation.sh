@@ -92,10 +92,12 @@ printf '[2026-08-23 09:00:00] 狀態: 正常\n' >> "$LOG_FILE"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
 check "does not rotate when first valid date == today" "[ -f \"$LOG_FILE\" ] && [ ! -f \"${LOG_FILE}.2026-08-23\" ]"
 
-# C. no-op when log absent
+# C. no active log: do not create one, but retention cleanup must still run.
 rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-01 09:00:00] expired archive entry\n' > "${LOG_FILE}.2026-07-01"
 VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
-check "no-op when log file absent" "[ ! -f \"$LOG_FILE\" ]"
+check "does not create active log when absent" "[ ! -f \"$LOG_FILE\" ]"
+check "prunes expired archive even when active log is absent" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
 
 # C2. even if the active log has no parseable timestamp, retention cleanup
 # must still run instead of being permanently disabled by the bad first line.
@@ -133,6 +135,23 @@ printf '[2026-07-20 09:00:00] old entry\n' > "${LOG_FILE}.2026-07-20"
 printf '[2026-08-20 09:00:00] recent entry\n' >> "${LOG_FILE}.2026-07-20"
 VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
 check "pruning keeps old-named archive with recent timestamped content" "[ -f \"${LOG_FILE}.2026-07-20\" ]"
+
+# The latest timestamp is defined by time, not physical line order. Clock/timezone
+# changes can make later-written lines older than earlier lines; a recent entry
+# anywhere in the archive must protect it from premature pruning.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-20 09:00:00] recent entry written first\n' > "${LOG_FILE}.2026-07-20"
+printf '[2026-07-20 10:00:00] older timestamp written later\n' >> "${LOG_FILE}.2026-07-20"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "pruning uses latest timestamp, not last physical timestamp" "[ -f \"${LOG_FILE}.2026-07-20\" ] && grep -q '2026-08-20 09:00:00' \"${LOG_FILE}.2026-07-20\""
+
+# Content-aware protection must not leak expired archives forever: if every
+# timestamp in an old-named archive is older than cutoff, it is still deleted.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-07-01 09:00:00] expired entry one\n' > "${LOG_FILE}.2026-07-01"
+printf '[2026-07-02 09:00:00] expired entry two\n' >> "${LOG_FILE}.2026-07-01"
+VPN_LOG_DATE_OVERRIDE="$TODAY" prune_old_logs
+check "deletes timestamped archive when all entries are expired" "[ ! -f \"${LOG_FILE}.2026-07-01\" ]"
 
 # ---- cmd_uninstall log handling ----
 echo "cmd_uninstall log handling:"
