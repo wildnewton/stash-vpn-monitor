@@ -628,11 +628,13 @@ log_retention_cutoff() {
 
 # 從日誌內容取第一個／最新有效 timestamp 日期。
 first_log_date() {
-    awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { print substr($0, 2, 10); exit }' "$1" 2>/dev/null
+    local today; today="$(today_str)"
+    awk -v today="$today" 'match($0, /^\[(19|20)[0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) /) { d=substr($0, 2, 10); if (d <= today) { print d; exit } }' "$1" 2>/dev/null
 }
 
 latest_log_date() {
-    awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { d=substr($0, 2, 10); if (latest == "" || d > latest) latest=d } END { if (latest != "") print latest }' "$1" 2>/dev/null
+    local today; today="$(today_str)"
+    awk -v today="$today" 'match($0, /^\[(19|20)[0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) /) { d=substr($0, 2, 10); if (d <= today && (latest == "" || d > latest)) latest=d } END { if (latest != "") print latest }' "$1" 2>/dev/null
 }
 
 # 日誌輪替：按第一個有效 timestamp 日期歸檔（基於時間，非行數）
@@ -644,9 +646,22 @@ rotate_log() {
             archive="${LOG_FILE}.${first_date}"
             rotated=false
             if [ -f "$archive" ]; then
-                # 同日 archive 已存在時保留兩段內容，不可用 mv 覆蓋舊歷史。
-                if cat "$LOG_FILE" >> "$archive" 2>/dev/null && : > "$LOG_FILE"; then
-                    rotated=true
+                # 先原子 detach active log；後續 writer 會寫入新的 active file，
+                # 不會被 collision merge 的清理步驟截斷。
+                local segment="${LOG_FILE}.rotate.$$.$RANDOM"
+                if mv "$LOG_FILE" "$segment" 2>/dev/null; then
+                    if cat "$segment" >> "$archive" 2>/dev/null; then
+                        rm -f "$segment"
+                        rotated=true
+                    else
+                        # append 失敗時優先保資料；即使造成重複，也不能丟歷史。
+                        if [ -e "$LOG_FILE" ]; then
+                            cat "$segment" >> "$LOG_FILE" 2>/dev/null || true
+                            rm -f "$segment" 2>/dev/null || true
+                        else
+                            mv "$segment" "$LOG_FILE" 2>/dev/null || true
+                        fi
+                    fi
                 fi
             elif mv "$LOG_FILE" "$archive" 2>/dev/null; then
                 rotated=true
