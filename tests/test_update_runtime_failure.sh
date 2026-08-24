@@ -42,6 +42,7 @@ git() {
         *) return 0 ;;
     esac
 }
+stat() { echo "fake-time"; return 0; }
 cp() {
     if [ "$1" = "$repo/vpn_runtime.sh" ]; then
         return 1
