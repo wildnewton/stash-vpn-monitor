@@ -656,8 +656,9 @@ rotate_log() {
                     else
                         # append 失敗時優先保資料；即使造成重複，也不能丟歷史。
                         if [ -e "$LOG_FILE" ]; then
-                            cat "$segment" >> "$LOG_FILE" 2>/dev/null || true
-                            rm -f "$segment" 2>/dev/null || true
+                            if cat "$segment" >> "$LOG_FILE" 2>/dev/null; then
+                                rm -f "$segment" 2>/dev/null || true
+                            fi
                         else
                             mv "$segment" "$LOG_FILE" 2>/dev/null || true
                         fi
