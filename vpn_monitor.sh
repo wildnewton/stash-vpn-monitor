@@ -626,29 +626,58 @@ log_retention_cutoff() {
     fi
 }
 
-# 日誌輪替：按首行日期歸檔為 vpn_monitor.log.YYYY-MM-DD（基於時間，非行數）
+# 從日誌內容取第一個／最後一個有效 timestamp 日期。
+first_log_date() {
+    awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { print substr($0, 2, 10); exit }' "$1" 2>/dev/null
+}
+
+last_log_date() {
+    awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { d=substr($0, 2, 10) } END { if (d != "") print d }' "$1" 2>/dev/null
+}
+
+# 日誌輪替：按第一個有效 timestamp 日期歸檔（基於時間，非行數）
 rotate_log() {
-    [ -f "$LOG_FILE" ] || return 0
-    local first_line first_date
-    first_line="$(head -n 1 "$LOG_FILE" 2>/dev/null || true)"
-    first_date="$(printf '%s\n' "$first_line" | sed -n 's/^\[\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\) .*/\1/p')"
-    [ -n "$first_date" ] || return 0
-    if [ "$first_date" != "$(today_str)" ]; then
-        mv "$LOG_FILE" "${LOG_FILE}.${first_date}" 2>/dev/null || true
-        log "日誌已輪替至 ${LOG_FILE}.${first_date}"
+    if [ -f "$LOG_FILE" ]; then
+        local first_date archive rotated
+        first_date="$(first_log_date "$LOG_FILE")"
+        if [ -n "$first_date" ] && [ "$first_date" != "$(today_str)" ]; then
+            archive="${LOG_FILE}.${first_date}"
+            rotated=false
+            if [ -f "$archive" ]; then
+                # 同日 archive 已存在時保留兩段內容，不可用 mv 覆蓋舊歷史。
+                if cat "$LOG_FILE" >> "$archive" 2>/dev/null && : > "$LOG_FILE"; then
+                    rotated=true
+                fi
+            elif mv "$LOG_FILE" "$archive" 2>/dev/null; then
+                rotated=true
+            fi
+
+            if $rotated; then
+                log "日誌已輪替至 ${archive}"
+            else
+                log "WARNING: 日誌輪替失敗，保留 active log"
+            fi
+        fi
     fi
+
+    # 即使 active log 缺失或無法解析，也不能讓 retention cleanup 永久停掉。
     prune_old_logs
 }
 
-# 清理超過保留期的 dated 日誌；不動 legacy .old 或其他後綴
+# 清理超過保留期的 dated 日誌；不動 legacy .old 或其他後綴。
+# 正常 archive 只看檔名；只有檔名已過期、準備刪除時才檢查最後 timestamp，
+# 避免 migration 形成的跨多日 archive 因第一日檔名而提早刪除。
 prune_old_logs() {
-    local dir base cutoff f d
+    local dir base cutoff f d filename_date
     dir="$(dirname "$LOG_FILE")"
     base="$(basename "$LOG_FILE")"
     cutoff="$(log_retention_cutoff)"
     for f in "$dir"/"$base".????-??-??; do
         [ -e "$f" ] || continue
-        d="${f#"$dir"/"$base".}"          # 提取 YYYY-MM-DD
+        filename_date="${f#"$dir"/"$base".}"
+        [ "$filename_date" \< "$cutoff" ] || continue
+        d="$(last_log_date "$f")"
+        [ -n "$d" ] || d="$filename_date"
         [ "$d" \< "$cutoff" ] && rm -f "$f" 2>/dev/null || true
     done
 }
