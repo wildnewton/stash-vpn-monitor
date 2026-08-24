@@ -50,16 +50,24 @@ cp() {
     command cp "$1" "$2"
 }
 
+# vpn_monitor.sh itself intentionally does not enable errexit, so execute this
+# fixture with the same shell option rather than inheriting the test harness -e.
 output="$tmpdir/update.out"
-if cmd_update >"$output" 2>&1; then
+set +e
+cmd_update >"$output" 2>&1
+update_rc=$?
+set -e
+
+fail=0
+if [ "$update_rc" -eq 0 ]; then
     echo "FAIL: --update must fail when vpn_runtime.sh cannot be copied" >&2
     cat "$output" >&2
-    exit 1
+    fail=1
 fi
 
 if [ "$(cat "$dest/vpn_monitor.sh")" != "old-monitor" ]; then
     echo "FAIL: --update must not replace vpn_monitor.sh before required runtime copy succeeds" >&2
-    exit 1
+    fail=1
 fi
 
 # The installer has set -e, so ordering is sufficient for the same first-split
@@ -68,6 +76,10 @@ monitor_line=$(grep -nF 'cp "$SRC_SCRIPT" "$INSTALL_SCRIPT"' "$INSTALLER" | head
 runtime_line=$(grep -nF 'cp "$SRC_RUNTIME_MODULE" "$INSTALL_RUNTIME_MODULE"' "$INSTALLER" | head -1 | cut -d: -f1)
 if [ -z "$monitor_line" ] || [ -z "$runtime_line" ] || [ "$runtime_line" -ge "$monitor_line" ]; then
     echo "FAIL: installer must copy vpn_runtime.sh before replacing vpn_monitor.sh" >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
