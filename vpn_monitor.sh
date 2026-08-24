@@ -631,8 +631,8 @@ first_log_date() {
     awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { print substr($0, 2, 10); exit }' "$1" 2>/dev/null
 }
 
-last_log_date() {
-    awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { d=substr($0, 2, 10) } END { if (d != "") print d }' "$1" 2>/dev/null
+latest_log_date() {
+    awk 'match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] /) { d=substr($0, 2, 10); if (latest == "" || d > latest) latest=d } END { if (latest != "") print latest }' "$1" 2>/dev/null
 }
 
 # 日誌輪替：按第一個有效 timestamp 日期歸檔（基於時間，非行數）
@@ -676,7 +676,7 @@ prune_old_logs() {
         [ -e "$f" ] || continue
         filename_date="${f#"$dir"/"$base".}"
         [ "$filename_date" \< "$cutoff" ] || continue
-        d="$(last_log_date "$f")"
+        d="$(latest_log_date "$f")"
         [ -n "$d" ] || d="$filename_date"
         [ "$d" \< "$cutoff" ] && rm -f "$f" 2>/dev/null || true
     done
