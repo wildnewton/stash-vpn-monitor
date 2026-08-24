@@ -70,10 +70,12 @@ fi
 # Installed, updated, and uninstalled copies must include the new runtime file.
 grep -Fq 'RUNTIME_MODULE="vpn_runtime.sh"' "$INSTALLER" \
     || fail "installer must declare vpn_runtime.sh"
-grep -Fq 'cp "$SRC_RUNTIME_MODULE" "$INSTALL_RUNTIME_MODULE"' "$INSTALLER" \
-    || fail "installer must copy vpn_runtime.sh"
-grep -Fq 'cp "$repo/vpn_runtime.sh" "$dest_dir/vpn_runtime.sh"' "$MONITOR" \
-    || fail "--update must copy vpn_runtime.sh"
+grep -Fq 'cp "$SRC_RUNTIME_MODULE" "$runtime_stage"' "$INSTALLER" \
+    || fail "installer must stage vpn_runtime.sh"
+grep -Fq 'cp "$repo/vpn_runtime.sh" "$runtime_stage"' "$MONITOR" \
+    || fail "--update must stage vpn_runtime.sh"
+grep -Fq 'mv "$runtime_stage" "$dest_dir/vpn_runtime.sh"' "$MONITOR" \
+    || fail "--update must install staged vpn_runtime.sh"
 grep -Fq 'for f in vpn_monitor.sh vpn_runtime.sh stash_switch_config.py vpn_report.py; do' "$MONITOR" \
     || fail "uninstall must remove vpn_runtime.sh"
 
