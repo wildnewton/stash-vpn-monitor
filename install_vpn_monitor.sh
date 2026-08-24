@@ -139,12 +139,19 @@ fi
 echo ""
 echo "[3/8] 安裝監控腳本..."
 
-# 先放置 runtime dependency；若此步失敗，set -e 會在舊 entrypoint 被覆蓋前停止。
-cp "$SRC_RUNTIME_MODULE" "$INSTALL_RUNTIME_MODULE"
-echo "    ✓ $INSTALL_RUNTIME_MODULE"
+# Stage the required monitor/runtime pair before changing either live file.
+runtime_stage="$INSTALL_RUNTIME_MODULE.new.$$"
+script_stage="$INSTALL_SCRIPT.new.$$"
+trap 'rm -f "$runtime_stage" "$script_stage"' EXIT
+cp "$SRC_RUNTIME_MODULE" "$runtime_stage"
+cp "$SRC_SCRIPT" "$script_stage"
+chmod +x "$script_stage"
 
-cp "$SRC_SCRIPT" "$INSTALL_SCRIPT"
-chmod +x "$INSTALL_SCRIPT"
+mv "$runtime_stage" "$INSTALL_RUNTIME_MODULE"
+mv "$script_stage" "$INSTALL_SCRIPT"
+trap - EXIT
+
+echo "    ✓ $INSTALL_RUNTIME_MODULE"
 echo "    ✓ $INSTALL_SCRIPT"
 
 # 複製 report implementation（vpn_monitor.sh --report 依賴它）

@@ -297,6 +297,7 @@ cmd_live_test() {
 
     local encoded_group
     encoded_group=$(urlencode "$routing_group")
+
     # 使用 switch_to_best_node（與恢復流程相同策略，測試真實路徑）
     # 內部含節點名驗證 + 連通性重試驗證
     echo "  使用 switch_to_best_node 切換到最佳節點（與恢復流程相同）..."
@@ -715,21 +716,37 @@ cmd_update() {
 
     local dest_dir="${INSTALL_DIR:-$HOME/.local/bin}"
     local updated=0
+    local runtime_stage="$dest_dir/.vpn_runtime.sh.new.$$"
+    local monitor_stage="$dest_dir/.vpn_monitor.sh.new.$$"
 
-    # Runtime is a required dependency of the new entrypoint. Install it first so
-    # a failed copy cannot leave a new vpn_monitor.sh paired with an old runtime.
-    if ! cp "$repo/vpn_runtime.sh" "$dest_dir/vpn_runtime.sh"; then
-        echo "✗ 更新失敗: 無法複製 vpn_runtime.sh"
+    # Stage the required pair first. Copy failures leave both live files intact.
+    rm -f "$runtime_stage" "$monitor_stage"
+    if ! cp "$repo/vpn_runtime.sh" "$runtime_stage"; then
+        echo "✗ 更新失敗: 無法準備 vpn_runtime.sh"
+        rm -f "$runtime_stage" "$monitor_stage"
         return 1
     fi
-    updated=$((updated + 1))
+    if ! cp "$repo/vpn_monitor.sh" "$monitor_stage"; then
+        echo "✗ 更新失敗: 無法準備 vpn_monitor.sh"
+        rm -f "$runtime_stage" "$monitor_stage"
+        return 1
+    fi
 
+    # Preserve the existing optional-copy behavior for these independent tools.
     cp "$repo/stash_switch_config.py" "$dest_dir/stash_switch_config.py" && updated=$((updated + 1))
     cp "$repo/vpn_report.py" "$dest_dir/vpn_report.py" && updated=$((updated + 1))
 
-    # Replace the entrypoint last, after its required runtime is safely in place.
-    if ! cp "$repo/vpn_monitor.sh" "$dest_dir/vpn_monitor.sh"; then
-        echo "✗ 更新失敗: 無法複製 vpn_monitor.sh"
+    # Both required files are now staged in the destination directory. Same-dir
+    # renames avoid the realistic partial-copy failures that caused version skew.
+    if ! mv "$runtime_stage" "$dest_dir/vpn_runtime.sh"; then
+        echo "✗ 更新失敗: 無法安裝 vpn_runtime.sh"
+        rm -f "$runtime_stage" "$monitor_stage"
+        return 1
+    fi
+    updated=$((updated + 1))
+    if ! mv "$monitor_stage" "$dest_dir/vpn_monitor.sh"; then
+        echo "✗ 更新失敗: 無法安裝 vpn_monitor.sh"
+        rm -f "$monitor_stage"
         return 1
     fi
     updated=$((updated + 1))
