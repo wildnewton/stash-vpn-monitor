@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MONITOR="$REPO_ROOT/vpn_monitor.sh"
 RUNTIME="$REPO_ROOT/vpn_runtime.sh"
 INSTALLER="$REPO_ROOT/install_vpn_monitor.sh"
+README="$REPO_ROOT/README.md"
 NODE_TEST="$REPO_ROOT/tests/test_node_ranking_policy.sh"
 ROTATION_TEST="$REPO_ROOT/tests/test_log_rotation.sh"
 
@@ -36,6 +37,9 @@ grep -Fq 'RUNTIME_SCRIPT="$SCRIPT_DIR/vpn_runtime.sh"' "$MONITOR" \
     || fail "vpn_monitor.sh must resolve vpn_runtime.sh next to itself"
 grep -Fq 'source "$RUNTIME_SCRIPT"' "$MONITOR" \
     || fail "vpn_monitor.sh must source vpn_runtime.sh"
+
+grep -Fq 'vpn_runtime.sh' "$README" \
+    || fail "README must document vpn_runtime.sh in the repository layout"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
