@@ -28,6 +28,8 @@ jobs:
           bash -n tests/test_log_report.sh
           bash -n tests/test_report_module_layout.sh
           bash -n tests/test_runtime_module_layout.sh
+          bash -n tests/test_update_runtime_failure.sh
+          bash -n tests/test_recovery_orchestration.sh
           bash -n tests/test_log_report_edge_cases.sh
           bash -n tests/test_log_rotation.sh
 
@@ -45,5 +47,7 @@ jobs:
           bash tests/test_log_report.sh
           bash tests/test_report_module_layout.sh
           bash tests/test_runtime_module_layout.sh
+          bash tests/test_update_runtime_failure.sh
+          bash tests/test_recovery_orchestration.sh
           bash tests/test_log_report_edge_cases.sh
           bash tests/test_log_rotation.sh
