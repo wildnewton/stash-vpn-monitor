@@ -335,35 +335,40 @@ echo ""
 # ════════════════════════════════════════════
 echo "[Structural] function property tests"
 
-# Verify no allow_hk parameter in function signature
-sig=$(sed -n '/^switch_to_best_node() {/,/^log "/p' "$RUNTIME" | head -5 || true)
-if echo "$sig" | grep -q 'allow_hk'; then
+func_body=$(sed -n '/^switch_to_best_node() {/,/^}/p' "$RUNTIME")
+
+if echo "$func_body" | grep -q 'allow_hk'; then
     check "No allow_hk parameter in switch_to_best_node()" 1
 else
     check "No allow_hk parameter in switch_to_best_node()" 0
 fi
 
-# Verify single pass (no switch_to_best_node false/true calls anywhere)
-false_calls=$(grep -h -c 'switch_to_best_node false' "$RUNTIME" "$SCRIPT" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-true_calls=$(grep -h -c 'switch_to_best_node true' "$RUNTIME" "$SCRIPT" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-[[ "${false_calls:-0}" -eq 0 ]] && [[ "${true_calls:-0}" -eq 0 ]]
-check "No two-pass pattern (switch_to_best_node false/true) in runtime/entrypoint" $?
+# A zero-match grep is the expected success case here; keep it inside `if` so
+# `set -euo pipefail` does not turn the expected grep status 1 into a test abort.
+if grep -Fq 'switch_to_best_node false' "$RUNTIME" "$SCRIPT" || \
+   grep -Fq 'switch_to_best_node true' "$RUNTIME" "$SCRIPT"; then
+    check "No two-pass pattern (switch_to_best_node false/true) in runtime/entrypoint" 1
+else
+    check "No two-pass pattern (switch_to_best_node false/true) in runtime/entrypoint" 0
+fi
 
-# Verify correct log message
-grep -Fq 'JP/SG > TW > US > other non-HK > HK' "$RUNTIME"
-check "Log message says 'JP/SG > TW > US > other non-HK > HK'" $?
+if grep -Fq 'JP/SG > TW > US > other non-HK > HK' "$RUNTIME"; then
+    check "Log message says 'JP/SG > TW > US > other non-HK > HK'" 0
+else
+    check "Log message says 'JP/SG > TW > US > other non-HK > HK'" 1
+fi
 
-# Verify old pattern removed
 if grep -Fq 'SG > JP' "$RUNTIME" "$SCRIPT"; then
     check "Old 'SG > JP' ranking pattern removed" 1
 else
     check "Old 'SG > JP' ranking pattern removed" 0
 fi
 
-# Verify delay=0 exclusion exists in function body
-func_body=$(sed -n '/^switch_to_best_node() {/,/^}/p' "$RUNTIME" || true)
-echo "$func_body" | grep -q '\[ "\$delay" -eq 0 \]'
-check "delay=0 exclusion condition exists in function body" $?
+if echo "$func_body" | grep -q '\[ "\$delay" -eq 0 \]'; then
+    check "delay=0 exclusion condition exists in function body" 0
+else
+    check "delay=0 exclusion condition exists in function body" 1
+fi
 
 echo ""
 echo "==============================="
