@@ -114,6 +114,23 @@ VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
 unset -f cat
 check "concurrent writer survives same-date collision rotation" "grep -q 'concurrent writer' \"$LOG_FILE\" || grep -q 'concurrent writer' \"${LOG_FILE}.2026-08-01\""
 
+# A6. if both collision append and active-file restore append fail, the detached
+# segment must remain on disk. Deleting it would turn a write failure into data loss.
+rm -f "$LOG_FILE" "${LOG_FILE}".*
+printf '[2026-08-01 08:00:00] earlier archived segment\n' > "${LOG_FILE}.2026-08-01"
+printf '[2026-08-01 09:00:00] later active segment\n' > "$LOG_FILE"
+cat_calls=0
+cat() {
+    cat_calls=$((cat_calls + 1))
+    if [ "$cat_calls" -eq 1 ]; then
+        printf '[2026-08-23 10:00:00] concurrent writer\n' > "$LOG_FILE"
+    fi
+    return 1
+}
+VPN_LOG_DATE_OVERRIDE=2026-08-23 rotate_log
+unset -f cat
+check "failed collision recovery keeps detached segment data" "grep -q 'later active segment' \"$LOG_FILE\" || grep -q 'later active segment' \"${LOG_FILE}.2026-08-01\" || grep -q 'later active segment' \"${LOG_FILE}.rotate.\"* 2>/dev/null"
+
 # B. no rotation when first valid date == today
 rm -f "$LOG_FILE" "${LOG_FILE}".*
 : > "$LOG_FILE"
