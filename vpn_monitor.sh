@@ -731,6 +731,11 @@ cmd_update() {
         rm -f "$runtime_stage" "$monitor_stage"
         return 1
     fi
+    if ! chmod u+r "$runtime_stage" || ! chmod u+rx "$monitor_stage"; then
+        echo "✗ 更新失敗: 無法設定 staged monitor/runtime 權限"
+        rm -f "$runtime_stage" "$monitor_stage"
+        return 1
+    fi
 
     # Preserve the existing optional-copy behavior for these independent tools.
     cp "$repo/stash_switch_config.py" "$dest_dir/stash_switch_config.py" && updated=$((updated + 1))

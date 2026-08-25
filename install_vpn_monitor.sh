@@ -145,7 +145,8 @@ script_stage="$INSTALL_SCRIPT.new.$$"
 trap 'rm -f "$runtime_stage" "$script_stage"' EXIT
 cp "$SRC_RUNTIME_MODULE" "$runtime_stage"
 cp "$SRC_SCRIPT" "$script_stage"
-chmod +x "$script_stage"
+chmod u+r "$runtime_stage"
+chmod u+rx "$script_stage"
 
 mv "$runtime_stage" "$INSTALL_RUNTIME_MODULE"
 mv "$script_stage" "$INSTALL_SCRIPT"
