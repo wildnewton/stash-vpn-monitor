@@ -287,6 +287,39 @@ resolve_probe_route() {
     return 2
 }
 
+# Read the authoritative runtime route for a probe host from /connections.
+# Issue Phase 1: "Prefer runtime connection evidence over static rule inference."
+# Returns: "rule<TAB>rulePayload<TAB>group<TAB>node" (group=chains[-1], node=chains[0])
+# or empty if the probe connection is not found.
+get_probe_route_from_connections() {
+    local probe_host="${1:-}"
+    [ -n "$probe_host" ] || return 1
+    local raw
+    raw=$(api_get /connections 2>/dev/null)
+    [ -n "$raw" ] || return 1
+    printf '%s' "$raw" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+target = sys.argv[1].lower()
+for c in d.get("connections", []):
+    h = c.get("metadata", {}).get("host", "").lower()
+    if h and target in h:
+        chains = c.get("chains", [])
+        if chains:
+            print("|".join([
+                c.get("rule", ""),
+                c.get("rulePayload", ""),
+                chains[-1],
+                chains[0],
+            ]))
+            sys.exit(0)
+sys.exit(1)
+' "$probe_host" 2>/dev/null
+}
+
 # 取得所有真實代理節點（排除 group、info 節點）
 get_proxy_nodes() {
     local data
@@ -410,17 +443,50 @@ check_connectivity() {
     local context="${1:-monitor}"
     local intended_group="${2:-}"
     local expected_node="${3:-}"
-    local route rule_type rule_payload routed_group selected_node http_code
+    local route rule_type rule_payload routed_group selected_node http_code probe_host runtime_route tmp_code
     [ -n "$intended_group" ] || intended_group=$(get_routing_group)
+
+    probe_host=$(printf '%s' "$HTTP_URL" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')
+
+    # Fire the HTTP probe first (sets runtime connection state), then resolve
+    # the route. Static rule inference (resolve_probe_route) handles simple
+    # DOMAIN/DOMAIN-SUFFIX/MATCH rules. When it returns UNRESOLVED (e.g.,
+    # RULE-SET that cannot be authoritatively evaluated), fall back to the
+    # authoritative /connections runtime evidence (issue Phase 1: prefer
+    # runtime connection evidence over static rule inference for unresolvable
+    # rule types).
+    http_code=$(curl -s -m "$HTTP_TIMEOUT" -x "http://127.0.0.1:$PROXY_PORT" \
+        -o /dev/null -w "%{http_code}" "$HTTP_URL" 2>/dev/null || echo "000")
 
     route=$(resolve_probe_route)
     IFS=$'\t' read -r rule_type rule_payload routed_group <<< "$route"
+
+    if [ "$rule_type" = "UNRESOLVED" ]; then
+        # Only RULE-SET types are unresolvable by static inference but
+        # authoritatively resolvable via /connections runtime evidence.
+        # Other UNRESOLVED causes (e.g., DOMAIN-KEYWORD) stay unresolved.
+        case "$rule_payload" in
+            RULE-SET*)
+                runtime_route=$(get_probe_route_from_connections "$probe_host")
+                if [ -n "$runtime_route" ]; then
+                    IFS='|' read -r rule_type rule_payload routed_group selected_node <<< "$runtime_route"
+                else
+                    selected_node=""
+                fi
+                ;;
+            *)
+                selected_node=""
+                ;;
+        esac
+    else
+        selected_node=$(get_group_selected_node "$routed_group")
+    fi
+
     if [ "$rule_type" = "UNRESOLVED" ] || [ -z "$routed_group" ] || [ "$routed_group" != "$intended_group" ]; then
         echo "measurement-unresolved"
         return 0
     fi
 
-    selected_node=$(get_group_selected_node "$routed_group")
     if [ -z "$selected_node" ]; then
         echo "measurement-unresolved"
         return 0
@@ -430,11 +496,6 @@ check_connectivity() {
         return 0
     fi
 
-    # Ping remains diagnostic context; HTTP through the correlated proxy route
-    # is the decisive end-to-end result.
-    ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$PING_TARGET" >/dev/null 2>&1 || true
-    http_code=$(curl -s -m "$HTTP_TIMEOUT" -x "http://127.0.0.1:$PROXY_PORT" \
-        -o /dev/null -w "%{http_code}" "$HTTP_URL" 2>/dev/null || echo "000")
     if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
         echo "pass"
     else

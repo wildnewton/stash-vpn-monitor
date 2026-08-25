@@ -30,6 +30,7 @@ method = "GET"
 data = ""
 output_path = None
 write_format = None
+has_proxy = False
 url = ""
 i = 0
 while i < len(args):
@@ -46,7 +47,10 @@ while i < len(args):
     elif arg == "-w":
         write_format = args[i + 1]
         i += 2
-    elif arg in ("-m", "-H", "-x", "--connect-timeout", "--max-time"):
+    elif arg == "-x":
+        has_proxy = True
+        i += 2
+    elif arg in ("-m", "-H", "--connect-timeout", "--max-time"):
         i += 2
     elif arg.startswith("-"):
         i += 1
@@ -63,7 +67,8 @@ status = 200
 body = ""
 transport_rc = 0
 
-if parts.hostname == "www.gstatic.com":
+if has_proxy:
+    state["last_probe_host"] = parts.hostname or ""
     codes = [item for item in os.environ.get("FAKE_PROBE_CODES", "204").split(",") if item]
     index = state.get("probe_index", 0)
     status = int(codes[min(index, len(codes) - 1)])
@@ -201,6 +206,22 @@ else:
         body = operation.get("body", os.environ.get("FAKE_PROVIDER_BODY", "provider-updated"))
     elif method == "DELETE" and endpoint == "/connections":
         status = 204
+    elif method == "GET" and endpoint == "/connections":
+        probe_host = state.get("last_probe_host", "www.gstatic.com")
+        conn_group = os.environ.get(
+            "FAKE_CONNECTIONS_GROUP", state.get("match_group", "Default Proxy")
+        )
+        conn_node = state["group_selected"].get(
+            conn_group, state.get("selected", "JP-DIAGNOSTIC")
+        )
+        body = json.dumps({"connections": [
+            {
+                "metadata": {"host": probe_host},
+                "rule": os.environ.get("FAKE_CONNECTIONS_RULE", "MATCH"),
+                "rulePayload": os.environ.get("FAKE_CONNECTIONS_RULE_PAYLOAD", ""),
+                "chains": [conn_node, conn_group],
+            }
+        ]})
 
 event["status"] = status
 with events_path.open("a") as stream:
@@ -1701,3 +1722,186 @@ def test_ordinary_recovery_order_and_retry_counts_are_unchanged(tmp_path, monito
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ORDINARY_RECOVERY_ORDER_OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 /connections route correlation (issue #13 A1 root-cause fix)
+#
+# The issue's Phase 1 guidance: "Prefer runtime connection evidence over static
+# rule inference." /connections exposes rule + rulePayload + chains, which
+# authoritatively identifies the probe's actual route/group/node.
+# ---------------------------------------------------------------------------
+
+
+def _connectivity_run(
+    tmp_path: Path,
+    monitor_library: Path,
+    *,
+    connections_group: str = "Default Proxy",
+    connections_rule: str = "MATCH",
+    probe_codes: str = "200",
+    selected: str = "JP-DIAGNOSTIC",
+    intended_group: str = "Default Proxy",
+    expected_node: str = "",
+    probe_rule_type: str = "RULE-SET(DOMAIN)",
+    probe_rule_payload: str = "cn-llm-direct",
+    probe_group: str = "DIRECT",
+    match_group: str = "Default Proxy",
+) -> subprocess.CompletedProcess[str]:
+    """Invoke check_connectivity directly with /connections route correlation."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "curl", FAKE_CURL)
+    _write_executable(fake_bin / "ping", "#!/bin/sh\nexit 0\n")
+
+    state_path = tmp_path / "stash-state.json"
+    state_path.write_text(json.dumps({
+        "selected": selected,
+        "group_selected": {
+            "Default Proxy": selected,
+            "Research + AI": "TW-FIXED-IP",
+        },
+        "match_group": match_group,
+        "probe_index": 0,
+    }))
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text("")
+
+    stash_dir = tmp_path / "stash"
+    stash_dir.mkdir()
+    (stash_dir / "config.yaml").write_text(CONFIGS["inline"])
+    config_path = tmp_path / "vpn-monitor.config"
+    config_path.write_text(textwrap.dedent(f"""\
+        API_SECRET="test-secret"
+        API_BASE="http://fake.stash"
+        PROXY_PORT="7890"
+        LOG_FILE="{tmp_path / 'vpn-monitor.log'}"
+        STASH_CONFIG_DIR="{stash_dir}"
+    """))
+
+    harness = textwrap.dedent(r'''
+        source "$MONITOR_LIBRARY"
+        RETRY_MAX=2
+        RETRY_INTERVAL=0
+        CONFIG_SWITCHER="$TEST_TMPDIR/does-not-exist.py"
+        tmpfile="$TEST_TMPDIR/return-trap-fallback"
+        : > "$tmpfile"
+        sleep() { :; }
+        notify() { :; }
+        result=$(check_connectivity "$TEST_CONTEXT" "$TEST_INTENDED_GROUP" "$TEST_EXPECTED_NODE")
+        echo "RESULT=$result"
+    ''')
+    env = os.environ.copy()
+    env.update({
+        "PATH": f"{fake_bin}:{env['PATH']}",
+        "VPN_MONITOR_CONFIG": str(config_path),
+        "MONITOR_LIBRARY": str(monitor_library),
+        "TEST_TMPDIR": str(tmp_path),
+        "TEST_CONTEXT": "monitor",
+        "TEST_INTENDED_GROUP": intended_group,
+        "TEST_EXPECTED_NODE": expected_node,
+        "FAKE_STASH_STATE": str(state_path),
+        "FAKE_STASH_EVENTS": str(events_path),
+        "FAKE_PROBE_CODES": probe_codes,
+        "FAKE_CONNECTIONS_GROUP": connections_group,
+        "FAKE_CONNECTIONS_RULE": connections_rule,
+        "HTTP_URL": "http://example.com/",
+        "TEST_ORIGINAL_GROUP": "Default Proxy",
+        "FAKE_STASH_CONFIG": str(stash_dir / "config.yaml"),
+        "FAKE_GROUP_OPTIONS": "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST",
+        "FAKE_REAL_PROXY_NODES": "JP-DIAGNOSTIC,TW-BACKUP,HK-LAST",
+        "FAKE_PROBE_RULE_TYPE": probe_rule_type,
+        "FAKE_PROBE_RULE_PAYLOAD": probe_rule_payload,
+        "FAKE_PROBE_GROUP": probe_group,
+    })
+    return subprocess.run(
+        ["bash", "-c", harness],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_connections_correlation_passes_when_chain_matches_intended_group(
+    tmp_path, monitor_library
+):
+    """/connections chain traverses Default Proxy with the expected node → pass.
+
+    The probe (example.com) routes via MATCH → Default Proxy (runtime-proven
+    on the real Stash config). When the chain's group matches the intended
+    group and the chain's node matches the requested candidate, the HTTP
+    result is a valid attribution → pass.
+    """
+    result = _connectivity_run(
+        tmp_path, monitor_library,
+        connections_group="Default Proxy",
+        probe_codes="200",
+        selected="JP-DIAGNOSTIC",
+        intended_group="Default Proxy",
+        expected_node="JP-DIAGNOSTIC",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESULT=pass" in result.stdout
+
+
+def test_connections_correlation_unresolved_when_chain_traverses_different_group(
+    tmp_path, monitor_library
+):
+    """/connections chain traverses Research + AI (not Default Proxy) → measurement-unresolved.
+
+    This is the A1 root cause: the historical gstatic probe routes through
+    Research + AI, a different group than switch_node() modifies. The HTTP
+    result cannot be attributed to the switched candidate, so it is
+    measurement-unresolved — NOT a candidate failure.
+    """
+    result = _connectivity_run(
+        tmp_path, monitor_library,
+        connections_group="Research + AI",
+        probe_codes="000",
+        selected="JP-DIAGNOSTIC",
+        intended_group="Default Proxy",
+        expected_node="JP-DIAGNOSTIC",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESULT=measurement-unresolved" in result.stdout
+
+
+def test_connections_correlation_validated_failure_when_chain_matches_but_http_fails(
+    tmp_path, monitor_library
+):
+    """/connections chain matches Default Proxy + expected node, but HTTP fails → validated-failure.
+
+    When route correlation is valid (chain group == intended, chain node ==
+    requested) but the end-to-end HTTP request fails, the result is a
+    validated-failure attributed to that candidate.
+    """
+    result = _connectivity_run(
+        tmp_path, monitor_library,
+        connections_group="Default Proxy",
+        probe_codes="503",
+        selected="JP-DIAGNOSTIC",
+        intended_group="Default Proxy",
+        expected_node="JP-DIAGNOSTIC",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESULT=validated-failure" in result.stdout
+
+
+def test_connections_correlation_unresolved_when_expected_node_differs_from_chain(
+    tmp_path, monitor_library
+):
+    """Chain matches group but node differs from requested → measurement-unresolved.
+
+    Post-switch attribution requires probe_time_selected_node == requested_node
+    (Gate 1 item 5). A mismatch means the switch did not take effect at probe
+    time, so the HTTP result cannot be attributed to the requested candidate.
+    """
+    result = _connectivity_run(
+        tmp_path, monitor_library,
+        connections_group="Default Proxy",
+        probe_codes="200",
+        selected="JP-DIAGNOSTIC",
+        intended_group="Default Proxy",
+        expected_node="OTHER-NODE",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESULT=measurement-unresolved" in result.stdout
