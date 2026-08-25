@@ -23,7 +23,7 @@ grep -Fq 'cp "$SRC_REPORT_SCRIPT" "$INSTALL_REPORT_SCRIPT"' "$INSTALLER" \
     || fail "installer must copy vpn_report.py"
 grep -Fq 'cp "$repo/vpn_report.py" "$dest_dir/vpn_report.py"' "$MONITOR" \
     || fail "--update must copy vpn_report.py"
-grep -Fq 'for f in vpn_monitor.sh stash_switch_config.py vpn_report.py; do' "$MONITOR" \
+grep -Fq 'for f in vpn_monitor.sh vpn_runtime.sh stash_switch_config.py vpn_report.py; do' "$MONITOR" \
     || fail "uninstall must remove vpn_report.py"
 
 # The large embedded Python implementation should no longer live in the shell entrypoint.

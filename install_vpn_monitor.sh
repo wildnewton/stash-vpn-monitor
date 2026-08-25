@@ -8,6 +8,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="vpn_monitor.sh"
+RUNTIME_MODULE="vpn_runtime.sh"
 PLIST_NAME="com.user.vpn-monitor.plist"
 CONFIG_SWITCHER="stash_switch_config.py"
 REPORT_SCRIPT="vpn_report.py"
@@ -15,6 +16,7 @@ REPORT_SCRIPT="vpn_report.py"
 # 來源路徑（當前目錄）
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_SCRIPT="$SRC_DIR/$SCRIPT_NAME"
+SRC_RUNTIME_MODULE="$SRC_DIR/$RUNTIME_MODULE"
 SRC_PLIST="$SRC_DIR/$PLIST_NAME"
 SRC_CONFIG_SWITCHER="$SRC_DIR/$CONFIG_SWITCHER"
 SRC_REPORT_SCRIPT="$SRC_DIR/$REPORT_SCRIPT"
@@ -29,6 +31,7 @@ STASH_PLIST="$HOME/Library/Group Containers/group.ws.stash.app/Library/Preferenc
 # 安裝目標
 INSTALL_DIR="$HOME/.local/bin"
 INSTALL_SCRIPT="$INSTALL_DIR/$SCRIPT_NAME"
+INSTALL_RUNTIME_MODULE="$INSTALL_DIR/$RUNTIME_MODULE"
 INSTALL_CONFIG_SWITCHER="$INSTALL_DIR/$CONFIG_SWITCHER"
 INSTALL_REPORT_SCRIPT="$INSTALL_DIR/$REPORT_SCRIPT"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
@@ -44,6 +47,11 @@ echo ""
 if [ ! -f "$SRC_SCRIPT" ]; then
     echo "❌ 找不到 $SCRIPT_NAME"
     echo "   請在腳本所在目錄執行此安裝程式"
+    exit 1
+fi
+if [ ! -f "$SRC_RUNTIME_MODULE" ]; then
+    echo "❌ 找不到 $RUNTIME_MODULE"
+    echo "   $SCRIPT_NAME 需要此 runtime module"
     exit 1
 fi
 if [ ! -f "$SRC_REPORT_SCRIPT" ]; then
@@ -130,8 +138,21 @@ fi
 # 3. 複製腳本
 echo ""
 echo "[3/8] 安裝監控腳本..."
-cp "$SRC_SCRIPT" "$INSTALL_SCRIPT"
-chmod +x "$INSTALL_SCRIPT"
+
+# Stage the required monitor/runtime pair before changing either live file.
+runtime_stage="$INSTALL_RUNTIME_MODULE.new.$$"
+script_stage="$INSTALL_SCRIPT.new.$$"
+trap 'rm -f "$runtime_stage" "$script_stage"' EXIT
+cp "$SRC_RUNTIME_MODULE" "$runtime_stage"
+cp "$SRC_SCRIPT" "$script_stage"
+chmod u+r "$runtime_stage"
+chmod u+rx "$script_stage"
+
+mv "$runtime_stage" "$INSTALL_RUNTIME_MODULE"
+mv "$script_stage" "$INSTALL_SCRIPT"
+trap - EXIT
+
+echo "    ✓ $INSTALL_RUNTIME_MODULE"
 echo "    ✓ $INSTALL_SCRIPT"
 
 # 複製 report implementation（vpn_monitor.sh --report 依賴它）
